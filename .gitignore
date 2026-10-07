@@ -1,1 +1,21 @@
-(empty)
+# Android/Kotlin project ignores
+*.log
+*.tmp
+*.swp
+*.swo
+
+# Build artifacts
+build/
+app/build/
+.gradle/
+.cxx/
+local.properties
+
+# IDE files
+.idea/
+*.iml
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db

@@ -6,6 +6,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
@@ -14,8 +15,6 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.util.concurrent.locks.ReentrantReadWriteLock
 import kotlin.collections.set
-import kotlin.concurrent.read
-import kotlin.concurrent.write
 
 /**
  * Обёртка над движком: постраничный lock-stripe вместо одного глобального мьютекса —
@@ -50,8 +49,8 @@ class SafeEngine(val raw: DocumentEngine) {
     private val draftCache = BitmapCache(DRAFT_BUDGET_KB)
     private val finalCache = BitmapCache(FINAL_BUDGET_KB)
 
-    private inline fun <T> read(block: () -> T): T = rw.read().use { block() }
-    private inline fun <T> write(block: () -> T): T = rw.write().use { block() }
+    private inline fun <T> read(block: () -> T): T = rw.readLock().use { block() }
+    private inline fun <T> write(block: () -> T): T = rw.writeLock().use { block() }
     private inline fun <R> java.util.concurrent.locks.Lock.use(block: () -> R): R = try { lock(); block() } finally { unlock() }
 
     suspend fun pageSize(i: Int): PageSize = read {
