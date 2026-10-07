@@ -3,7 +3,6 @@ package app.folio.annotations
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -83,13 +82,50 @@ fun PageOverlay(
     Canvas(
         modifier.pointerInput(tool, stylusOnly) {
             when (tool) {
-                Tool.NONE -> detectTapGestures(onDoubleTap = null) { p ->
-                    val n = cur.firstOrNull {
-                        it.type == "NOTE" && hypot(it.pts[0] * size.width - p.x, it.pts[1] * size.height - p.y) < noteR * 2f
+                // ВАЖНО: не detectTapGestures — он консьюмит даун в Initial-пассе и
+                // блокирует родительский pinch (конфликт жестов). Свой обработчик тапа:
+                // читаем в Main-пассе, консьюмим только одиночный «наш» указатель.
+                Tool.NONE -> awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Main)
+                    if (!isStrokePointer(down, stylusOnly)) return@awaitEachGesture // палец при pinch/скролле — отдаём родителю
+                    var ev = down.event
+                    var moved = false
+                    while (true) {
+                        val ch = ev.changes.firstOrNull { it.id == down.id } ?: break
+                        if (ev.changes.count { it.pressed } >= 2) return@awaitEachGesture // начался pinch — выход без consume
+                        if (!ch.pressed) {
+                            if (!moved) {
+                                val p = ch.position
+                                val n = cur.firstOrNull {
+                                    it.type == "NOTE" && hypot(it.pts[0] * size.width - p.x, it.pts[1] * size.height - p.y) < noteR * 2f
+                                }
+                                if (n != null) onNoteOpen(n) else onTapBackground()
+                            }
+                            ch.consume()
+                            break
+                        }
+                        if (hypot(ch.position.x - down.position.x, ch.position.y - down.position.y) > touchSlop) moved = true
+                        ev = awaitPointerEvent(PointerEventPass.Main)
                     }
-                    if (n != null) onNoteOpen(n) else onTapBackground()
                 }
-                Tool.NOTE -> detectTapGestures { p -> onNoteAt(p.x / size.width, p.y / size.height) }
+                Tool.NOTE -> awaitEachGesture {
+                    // тот же принцип: не блокируем pinch родителя detectTapGestures'ом
+                    val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Main)
+                    if (!isStrokePointer(down, stylusOnly)) return@awaitEachGesture
+                    var ev = down.event
+                    var moved = false
+                    while (true) {
+                        val ch = ev.changes.firstOrNull { it.id == down.id } ?: break
+                        if (ev.changes.count { it.pressed } >= 2) return@awaitEachGesture
+                        if (!ch.pressed) {
+                            if (!moved) onNoteAt(ch.position.x / size.width, ch.position.y / size.height)
+                            ch.consume()
+                            break
+                        }
+                        if (hypot(ch.position.x - down.position.x, ch.position.y - down.position.y) > touchSlop) moved = true
+                        ev = awaitPointerEvent(PointerEventPass.Main)
+                    }
+                }
                 else -> awaitEachGesture {
                     // Двухфазный захват — ключевой фикс конфликта с родительским pinch:
                     // 1) Первый down читаем в Initial-пассе, но НЕ консьюмим сразу. Если второй
