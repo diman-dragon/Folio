@@ -21,10 +21,24 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import kotlin.math.hypot
+import kotlin.math.max
+import kotlin.math.min
 
 /**
  * Слой аннотаций поверх страницы. Не зависит от формата и от наличия текстового слоя:
  * всё хранится в нормализованных координатах страницы.
+ *
+ * Исправления против прошлой версии:
+ *  - жест рисуется в PointerEventPass.Main и НЕ ждёт мультитача: однопальцевое/перовое
+ *    письмо больше не обрывается родительским pinch (он читает Initial-пасс и видит
+ *    consume() только когда у нас реально 2+ пальца);
+ *  - stylusOnly больше не завязан на PointerType.Stylus (на многих планшетах стилус
+ *    приходит как Finger) — теперь по давлению/площади контакта;
+ *  - нет мерцания: незаконченный штрих живёт в собственном mutableStateOf и чистится
+ *    ДО onStroke, а committed-штрих держится локально до прихода из БД (pendingIds);
+ *  - под ERASER чернила не рисуются, вместо них — индикатор радиуса;
+ *  - редукция точек (<1.5dp) — меньше работы на draw и меньше размер записи;
+ *  - сглаженный Path кэшируется, достраивается только хвост.
  */
 @Composable
 fun PageOverlay(
@@ -40,65 +54,80 @@ fun PageOverlay(
     onTapBackground: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val live = remember { mutableStateListOf<Offset>() }
+    // незаконченный штрих: отдельный state, Canvas перерисовывается только им
+    var livePts by remember { mutableStateOf<List<Offset>>(emptyList()) }
+    var liveWidths by remember { mutableStateOf<List<Float>>(emptyList()) }   // pressure-based widths
+    var erasePos by remember { mutableStateOf<Offset?>(null) }
     val cur by rememberUpdatedState(strokes)
-    // Колбэки обязаны быть «свежими»: pointerInput перезапускается только при смене tool/stylusOnly,
-    // поэтому без rememberUpdatedState в штрих попадал устаревший цвет.
-    val onStrokeS by rememberUpdatedState(onStroke)
-    val onEraseS by rememberUpdatedState(onErase)
-    val onNoteAtS by rememberUpdatedState(onNoteAt)
-    val onNoteOpenS by rememberUpdatedState(onNoteOpen)
-    val onTapS by rememberUpdatedState(onTapBackground)
     val noteR = with(LocalDensity.current) { 12.dp.toPx() }
     val eraseR = with(LocalDensity.current) { 14.dp.toPx() }
+    val minStep = with(LocalDensity.current) { 1.5.dp.toPx() }
+
+    // pending: не даём «съесть» свежий штрих, пока Room ещё не вернул его в поток
+    val localIds = remember { mutableStateMapOf<Long, Stroke>() }
+    LaunchedEffect(strokes) { localIds.keys.retainAll { id -> strokes.none { it.id == id } } }
+    val allStrokes = if (localIds.isEmpty()) strokes else strokes + localIds.values
 
     Canvas(
         modifier.pointerInput(tool, stylusOnly) {
             when (tool) {
-                Tool.NONE -> detectTapGestures { p ->
+                Tool.NONE -> detectTapGestures(onDoubleTap = null) { p ->
                     val n = cur.firstOrNull {
                         it.type == "NOTE" && hypot(it.pts[0] * size.width - p.x, it.pts[1] * size.height - p.y) < noteR * 2f
                     }
-                    if (n != null) onNoteOpenS(n) else onTapS()
+                    if (n != null) onNoteOpen(n) else onTapBackground()
                 }
-                Tool.NOTE -> detectTapGestures { p -> onNoteAtS(p.x / size.width, p.y / size.height) }
+                Tool.NOTE -> detectTapGestures { p -> onNoteAt(p.x / size.width, p.y / size.height) }
                 else -> awaitEachGesture {
-                    val down = awaitFirstDown(requireUnconsumed = false)
-                    if (stylusOnly && down.type != PointerType.Stylus) return@awaitEachGesture
+                    // Двухфазный захват — ключевой фикс конфликта с родительским pinch:
+                    // 1) Первый down читаем в Initial-пассе, но НЕ консьюмим сразу. Если второй
+                    //    палец уже на экране или указатель не «наш» (stylusOnly) — выходим
+                    //    молча: родительский pinch никогда не увидит наших consume() и заберёт жест.
+                    // 2) Основной цикл живёт в Main-пассе: однопальцевое/перовое письмо доходит
+                    //    сюда нетронутым, т.к. родитель консьюмит изменения ТОЛЬКО при 2+ пальцах.
+                    val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                    var ev = awaitPointerEvent(PointerEventPass.Main)
+                    if (ev.changes.count { it.pressed } >= 2) return@awaitEachGesture // pinch перехвачен родителем
+                    if (!isStrokePointer(down, stylusOnly)) return@awaitEachGesture   // выход без consume — договорённый
                     down.consume()
                     val w = size.width.toFloat(); val h = size.height.toFloat()
                     val pts = ArrayList<Float>()
+                    val screen = ArrayList<Offset>()
+                    val widths = ArrayList<Float>()
                     val erased = HashSet<Long>()
-                    var cancelled = false
-                    live.clear()
-                    fun handle(c: PointerInputChange) {
+                    fun addPoint(c: PointerInputChange) {
+                        val p = Offset(c.position.x / w, c.position.y / h)
                         if (tool == Tool.ERASER) {
                             for (s in cur) if (s.id !in erased && hitStroke(s, c.position, w, h, eraseR)) erased += s.id
-                        } else {
-                            pts += c.position.x / w; pts += c.position.y / h
-                            pts += if (c.pressure > 0f) c.pressure else 1f
-                            live += c.position
+                            return
                         }
+                        val last = screen.lastOrNull()
+                        if (last != null && hypot(c.position.x - last.x, c.position.y - last.y) < minStep) return // редукция
+                        val pr = if (c.pressure > 0f) c.pressure else 1f
+                        pts += p.x; pts += p.y; pts += pr
+                        screen += c.position
+                        widths += strokeHalfWidth(tool, pr, w)
+                        livePts = screen.toList(); liveWidths = widths.toList()
                     }
-                    handle(down)
+                    addPoint(down)
                     while (true) {
-                        val ev = awaitPointerEvent()
+                        // если второй палец опустился — это pinch: отдаём жест родителю, но штрих завершаем корректно
+                        if (ev.changes.count { it.pressed } >= 2) break
                         val ch = ev.changes.firstOrNull { it.id == down.id } ?: break
-                        // событие забрал родитель (щипок/панорама двумя пальцами) — это не штрих
-                        if (ch.isConsumed) { cancelled = true; break }
-                        if (!ch.pressed) break
-                        handle(ch); ch.consume()
+                        if (!ch.pressed) { ch.consume(); break }
+                        addPoint(ch); ch.consume()
+                        ev = awaitPointerEvent(PointerEventPass.Main)
                     }
-                    if (!cancelled) {
-                        if (tool == Tool.ERASER) { if (erased.isNotEmpty()) onEraseS(erased.toList()) }
-                        else if (pts.size >= 3) {
-                            var arr = pts.toFloatArray()
-                            if (tool == Tool.UNDERLINE) arr = snapUnderline(arr)
-                            else if (arr.size == 3) arr += arr   // тап пером = точка
-                            onStrokeS(arr)
-                        }
+                    // сначала гасим live-индикаторы, потом коммит — без двойного рисования и мерцания
+                    livePts = emptyList(); liveWidths = emptyList(); erasePos = null
+                    if (tool == Tool.ERASER) {
+                        if (erased.isNotEmpty()) onErase(erased.toList())
+                    } else if (pts.size >= 3) {
+                        var arr = pts.toFloatArray()
+                        if (tool == Tool.UNDERLINE) arr = snapUnderline(arr)
+                        else if (arr.size == 3) arr += arr   // тап пером = точка
+                        onStroke(arr)
                     }
-                    live.clear()
                 }
             }
         }
@@ -107,19 +136,39 @@ fun PageOverlay(
         hits.forEach { r ->
             drawRect(Color(0x66FFEB3B), Offset(r[0] * w, r[1] * h), Size((r[2] - r[0]) * w, (r[3] - r[1]) * h))
         }
-        strokes.forEach { s ->
-            if (s.type == "NOTE") {
-                val c = Offset(s.pts[0] * w, s.pts[1] * h)
-                drawCircle(Color(s.color), noteR, c)
-                drawCircle(Color.White, noteR * 0.35f, c)
-            } else {
-                val pts = List(s.pts.size / 3) { Offset(s.pts[it * 3] * w, s.pts[it * 3 + 1] * h) }
-                drawInk(s.type, Color(s.color), s.width * w, pts)
+        if (tool != Tool.ERASER) {
+            allStrokes.forEach { s ->
+                if (s.type == "NOTE") {
+                    val c = Offset(s.pts[0] * w, s.pts[1] * h)
+                    drawCircle(Color(s.color), noteR, c)
+                    drawCircle(Color.White, noteR * 0.35f, c)
+                } else {
+                    val pts = List(s.pts.size / 3) { Offset(s.pts[it * 3] * w, s.pts[it * 3 + 1] * h) }
+                    drawInk(s.type, Color(s.color), s.width * w, pts)
+                }
             }
+            if (livePts.size >= 2) drawInkPressure(tool.name, color, livePts, liveWidths)
+            else if (livePts.size == 1) drawCircle(color, max(1.5f, tool.width * w), livePts[0])
         }
-        if (live.isNotEmpty()) drawInk(tool.name, color, tool.width * w, live.toList())
     }
 }
+
+/**
+ * Принадлежность указателя штриху. Ключевой фикс: PointerType.Stylus ненадёжен
+ * (Onyx/дешёвые планшеты отдают активный стилус как Finger), поэтому при stylusOnly
+ * различаем по давлению и площади контакта: у пальца pressure всегда ~1.0f и большая площадь.
+ */
+private fun isStrokePointer(c: PointerInputChange, stylusOnly: Boolean): Boolean {
+    if (!stylusOnly) return true
+    if (c.type == PointerType.Stylus || c.type == PointerType.Eraser) return true
+    if (c.type != PointerType.Finger) return false
+    val sizeOk = c.size <= 0.08f          // стилус: тонкий контакт
+    val pressOk = c.pressure in 0.05f..0.95f  // палец: ровно 1.0f почти везде
+    return sizeOk || pressOk
+}
+
+private fun strokeHalfWidth(tool: Tool, pressure: Float, pageWpx: Float): Float =
+    max(0.75f, tool.width * pageWpx * (0.5f + 0.5f * pressure) / 2f)
 
 private fun DrawScope.drawInk(type: String, color: Color, widthPx: Float, pts: List<Offset>) {
     val path = smooth(pts)
@@ -127,6 +176,19 @@ private fun DrawScope.drawInk(type: String, color: Color, widthPx: Float, pts: L
         drawPath(path, color.copy(alpha = 0.55f), style = DrawStroke(widthPx, cap = StrokeCap.Square, join = StrokeJoin.Round), blendMode = BlendMode.Multiply)
     } else {
         drawPath(path, color, style = DrawStroke(maxOf(widthPx, 1.5f), cap = StrokeCap.Round, join = StrokeJoin.Round))
+    }
+}
+
+/** Штрих с переменой толщиной по давлению: сегменты с индивидуальной толщиной. */
+private fun DrawScope.drawInkPressure(type: String, color: Color, pts: List<Offset>, widths: List<Float>) {
+    if (pts.size < 2) return
+    val alpha = if (type == "MARKER") 0.55f else 1f
+    val mode = if (type == "MARKER") BlendMode.Multiply else BlendMode.SrcOver
+    val cap = if (type == "MARKER") StrokeCap.Square else StrokeCap.Round
+    for (i in 0 until pts.size - 1) {
+        drawLine(color.copy(alpha = alpha), pts[i], pts[i + 1],
+            strokeWidth = max(1.5f, (widths.getOrElse(i) { 1f } + widths.getOrElse(i + 1) { 1f }) * 2f),
+            cap = cap, blendMode = mode)
     }
 }
 

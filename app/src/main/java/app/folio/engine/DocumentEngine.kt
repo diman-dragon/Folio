@@ -20,8 +20,12 @@ interface DocumentEngine : AutoCloseable {
     fun layout(width: Float, height: Float, em: Float): Int
     fun pageSize(index: Int): PageSize
     fun renderPage(index: Int, widthPx: Int): Bitmap
+    /** Быстрый черновой кадр: низкое разрешение + RGB_565 (вдвое меньше памяти, вдвое быстрее GC). */
+    fun renderPageDraft(index: Int, widthPx: Int): Bitmap
     fun toc(): List<TocItem>
     fun search(query: String, limit: Int = 300): List<Hit>
+    /** Одна страница для отменяемого пошагового поиска; null — если совпадений нет. */
+    fun searchPage(index: Int, query: String): Hit?
     fun title(): String?
     fun author(): String?
 }

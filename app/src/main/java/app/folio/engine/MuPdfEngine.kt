@@ -48,6 +48,40 @@ class MuPdfEngine(path: String) : DocumentEngine {
         AndroidDrawDevice.drawPageFitWidth(it, widthPx)
     }
 
+    /** Черновой кадр: то же, что final, но в RGB_565 — вдвое меньше alloc/GC на слабых устройствах. */
+    override fun renderPageDraft(index: Int, widthPx: Int): Bitmap = withPage(index) { p ->
+        val src = AndroidDrawDevice.drawPageFitWidth(p, widthPx)
+        try {
+            if (src.config == Bitmap.Config.RGB_565) src
+            else {
+                val out = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.RGB_565)
+                android.graphics.Canvas(out).drawBitmap(src, 0f, 0f, null)
+                src.recycle()
+                out
+            }
+        } catch (t: Throwable) { src }   // если конвертация не удалась — отдаём как есть
+    }
+
+    private fun hitFrom(i: Int, p: Page, query: String): Hit? {
+        val b = p.bounds
+        val w = b.x1 - b.x0
+        val h = b.y1 - b.y0
+        val res = p.search(query) ?: return null
+        if (res.isEmpty()) return null
+        val rects = res.flatMap { quads ->
+            quads.map { q ->
+                floatArrayOf(
+                    (minOf(q.ul_x, q.ll_x) - b.x0) / w, (minOf(q.ul_y, q.ur_y) - b.y0) / h,
+                    (maxOf(q.ur_x, q.lr_x) - b.x0) / w, (maxOf(q.ll_y, q.lr_y) - b.y0) / h
+                )
+            }
+        }
+        return Hit(i, rects)
+    }
+
+    override fun searchPage(index: Int, query: String): Hit? =
+        if (index in 0 until count) withPage(index) { hitFrom(index, it, query) } else null
+
     override fun toc(): List<TocItem> {
         val out = ArrayList<TocItem>()
         fun walk(items: Array<Outline>?, level: Int) {
@@ -66,24 +100,7 @@ class MuPdfEngine(path: String) : DocumentEngine {
         var total = 0
         for (i in 0 until count) {
             if (total >= limit) break
-            withPage(i) { p ->
-                val b = p.bounds
-                val w = b.x1 - b.x0
-                val h = b.y1 - b.y0
-                val res = p.search(query)
-                if (res != null && res.isNotEmpty()) {
-                    val rects = res.flatMap { quads ->
-                        quads.map { q ->
-                            floatArrayOf(
-                                (minOf(q.ul_x, q.ll_x) - b.x0) / w, (minOf(q.ul_y, q.ur_y) - b.y0) / h,
-                                (maxOf(q.ur_x, q.lr_x) - b.x0) / w, (maxOf(q.ll_y, q.lr_y) - b.y0) / h
-                            )
-                        }
-                    }
-                    out += Hit(i, rects)
-                    total += res.size
-                }
-            }
+            searchPage(i, query)?.let { out += it; total += it.rects.size }
         }
         return out
     }

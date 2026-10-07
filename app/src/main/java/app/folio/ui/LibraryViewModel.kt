@@ -9,30 +9,23 @@ import androidx.lifecycle.viewModelScope
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import app.folio.data.BookEntity
-import app.folio.data.CoverMaker
 import app.folio.data.Graph
 import app.folio.data.ScanWorker
 import app.folio.engine.Formats
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 enum class SortBy(val label: String) { RECENT("Недавние"), TITLE("По названию"), ADDED("По добавлению"), PROGRESS("По прогрессу") }
 
 class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     private val dao = Graph.db.books()
-
-    /** 0 = «Недавние», 1 = «Библиотека». Хранится здесь, чтобы переживать открытие книги. */
-    val tab = MutableStateFlow(0)
     val query = MutableStateFlow("")
-    val sort = MutableStateFlow(SortBy.TITLE)
+    val sort = MutableStateFlow(SortBy.RECENT)
     val filter = MutableStateFlow<String?>(null)
     val onlyFav = MutableStateFlow(false)
 
-    /** Вся библиотека (без блока «недавние»). */
     val books: StateFlow<List<BookEntity>> =
         combine(dao.observeAll(), query, sort, filter, onlyFav) { all, q, s, f, fav ->
             val list = all.filter {
@@ -47,22 +40,13 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             }
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    /** Вкладка «Недавние»: всё, что открывалось, по времени последнего открытия. */
     val recent: StateFlow<List<BookEntity>> = dao.observeAll()
-        .map { l -> l.filter { it.lastOpened > 0 }.sortedByDescending { it.lastOpened }.take(60) }
+        .map { l -> l.filter { it.lastOpened > 0 && it.progress < 0.99f }.sortedByDescending { it.lastOpened }.take(10) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val scanning: StateFlow<Boolean> = WorkManager.getInstance(app).getWorkInfosForUniqueWorkFlow("scan")
         .map { l -> l.any { it.state == WorkInfo.State.RUNNING || it.state == WorkInfo.State.ENQUEUED } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
-
-    // обложки для видимых карточек: если воркер не успел или упал — делаем лениво, по одной
-    private val coverLock = Mutex()
-    private val tried = HashSet<String>()
-    fun ensureCover(b: BookEntity) {
-        if (!tried.add(b.uri)) return
-        viewModelScope.launch(Dispatchers.IO) { coverLock.withLock { CoverMaker.make(getApplication(), b) } }
-    }
 
     fun addRoot(uri: Uri) {
         val ctx = getApplication<Application>()

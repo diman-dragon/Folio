@@ -1,5 +1,20 @@
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
-    <path android:fillColor="#FFFFFF" android:pathData="M34,30h32a4,4 0 0 1 4,4v40a4,4 0 0 1 -4,4H34z"/>
-    <path android:fillColor="#3F51B5" android:pathData="M42,40h20v4H42zM42,50h20v4H42zM42,60h14v4H42z"/>
+    <!-- Открытая книга: две разворота-половинки с мягким изгибом корешка -->
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M54,36 C47,31 38,29 28,29 L28,75 C38,75 47,77 54,82 Z"/>
+    <path android:fillColor="#F1F4FF"
+        android:pathData="M54,36 C61,31 70,29 80,29 L80,75 C70,75 61,77 54,82 Z"/>
+    <!-- теневая полоска у корешка -->
+    <path android:fillColor="#1A2745" android:fillAlpha="0.18"
+        android:pathData="M52,36.5 L56,36.5 L56,81.5 L52,81.5 Z"/>
+    <!-- строки текста на левой странице -->
+    <path android:fillColor="#C9D2E8"
+        android:pathData="M34,40h13v2.6H34zM34,47h13v2.6H34zM34,54h10v2.6H34z"/>
+    <!-- перо-штрих поверх правой страницы — подпись «читаем и пишем» -->
+    <path android:strokeColor="#FFB300" android:strokeWidth="4.5"
+        android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:pathData="M60,58 C65,50 70,46 76,42"/>
+    <path android:fillColor="#FFB300"
+        android:pathData="M76,42 m-3.4,0 a3.4,3.4 0 1,0 6.8,0 a3.4,3.4 0 1,0 -6.8,0"/>
 </vector>

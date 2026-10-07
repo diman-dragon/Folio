@@ -57,8 +57,11 @@ class ReaderViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val o = DocumentOpener(getApplication()).open(Uri.parse(b.uri), b.name)
                 opened = o
-                if (o.engine.needsPassword) _state.update { it.copy(loading = false, needsPassword = true) }
-                else finishOpen(o, b)
+                if (o.engine.needsPassword) {
+                    // заводим ЕДИНСТВЕННУЮ обёртку сразу: unlock() переиспользует её,
+                    // второй SafeEngine поверх того же документа больше не создаётся (фикс утечки)
+                    _state.update { it.copy(loading = false, needsPassword = true, engine = SafeEngine(o.engine)) }
+                } else finishOpen(o, b)
             } catch (t: Throwable) {
                 _state.update { it.copy(loading = false, error = t.message ?: t.javaClass.simpleName) }
             }
@@ -67,11 +70,17 @@ class ReaderViewModel(app: Application) : AndroidViewModel(app) {
 
     fun unlock(pw: String) = viewModelScope.launch {
         val o = opened ?: return@launch
-        if (SafeEngine(o.engine).unlock(pw)) finishOpen(o, book!!) else toast.tryEmit("Неверный пароль")
+        // ВАЖНО (фикс утечки): раньше здесь создавался ВТОРОЙ SafeEngine поверх уже
+        // открытого — два кэша, два набора локов, первый никогда не закрывался.
+        // Теперь переиспользуем тот же engine из состояния.
+        val se = _state.value.engine
+        if (se != null && se.unlock(pw)) finishOpen(o, book!!)
+        else toast.tryEmit("Неверный пароль")
     }
 
     private suspend fun finishOpen(o: Opened, b: BookEntity) {
-        val se = SafeEngine(o.engine)
+        // переиспользуем существующую обёртку, если она уже есть (unlock-путь)
+        val se = _state.value.engine ?: SafeEngine(o.engine)
         db.books().touch(b.uri, System.currentTimeMillis())
         val reflow = o.engine.isReflowable
         val n = if (reflow) 0 else o.engine.pageCount
@@ -137,16 +146,28 @@ class ReaderViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // ---- поиск ----
+    private var searchJob: Job? = null
+
+    /**
+     * Отменяемый пошаговый поиск: результат прилетает постранично (UI не ждёт весь документ),
+     * новый запрос отменяет предыдущий скан.
+     */
     fun search(q: String) {
         val se = _state.value.engine ?: return
-        if (q.isBlank()) return
-        viewModelScope.launch {
-            val r = se.search(q)
-            hits.value = r.associate { it.page to it.rects }
-            if (r.isEmpty()) toast.tryEmit("Ничего не найдено")
+        searchJob?.cancel()
+        if (q.isBlank()) { hits.value = emptyMap(); return }
+        searchJob = viewModelScope.launch {
+            val acc = HashMap<Int, List<FloatArray>>()
+            try {
+                se.searchPaged(q, limit = 300) { h ->
+                    acc[h.page] = h.rects
+                    hits.value = acc.toMap()   // partial-обновление по мере сканирования
+                }
+                if (acc.isEmpty()) toast.tryEmit("Ничего не найдено")
+            } catch (_: CancellationException) { /* пользователь ввёл новый запрос — тихо выходим */ }
         }
     }
-    fun clearSearch() { hits.value = emptyMap() }
+    fun clearSearch() { searchJob?.cancel(); hits.value = emptyMap() }
 
     // ---- экспорт ----
     fun exportPdf(target: Uri) {
