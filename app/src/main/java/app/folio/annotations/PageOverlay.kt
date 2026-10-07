@@ -42,6 +42,13 @@ fun PageOverlay(
 ) {
     val live = remember { mutableStateListOf<Offset>() }
     val cur by rememberUpdatedState(strokes)
+    // Колбэки обязаны быть «свежими»: pointerInput перезапускается только при смене tool/stylusOnly,
+    // поэтому без rememberUpdatedState в штрих попадал устаревший цвет.
+    val onStrokeS by rememberUpdatedState(onStroke)
+    val onEraseS by rememberUpdatedState(onErase)
+    val onNoteAtS by rememberUpdatedState(onNoteAt)
+    val onNoteOpenS by rememberUpdatedState(onNoteOpen)
+    val onTapS by rememberUpdatedState(onTapBackground)
     val noteR = with(LocalDensity.current) { 12.dp.toPx() }
     val eraseR = with(LocalDensity.current) { 14.dp.toPx() }
 
@@ -52,9 +59,9 @@ fun PageOverlay(
                     val n = cur.firstOrNull {
                         it.type == "NOTE" && hypot(it.pts[0] * size.width - p.x, it.pts[1] * size.height - p.y) < noteR * 2f
                     }
-                    if (n != null) onNoteOpen(n) else onTapBackground()
+                    if (n != null) onNoteOpenS(n) else onTapS()
                 }
-                Tool.NOTE -> detectTapGestures { p -> onNoteAt(p.x / size.width, p.y / size.height) }
+                Tool.NOTE -> detectTapGestures { p -> onNoteAtS(p.x / size.width, p.y / size.height) }
                 else -> awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
                     if (stylusOnly && down.type != PointerType.Stylus) return@awaitEachGesture
@@ -62,12 +69,11 @@ fun PageOverlay(
                     val w = size.width.toFloat(); val h = size.height.toFloat()
                     val pts = ArrayList<Float>()
                     val erased = HashSet<Long>()
+                    var cancelled = false
                     live.clear()
                     fun handle(c: PointerInputChange) {
                         if (tool == Tool.ERASER) {
-                            for (s in cur) if (s.id !in erased && hitStroke(s, c.position, w, h, eraseR)) {
-                                erased += s.id
-                            }
+                            for (s in cur) if (s.id !in erased && hitStroke(s, c.position, w, h, eraseR)) erased += s.id
                         } else {
                             pts += c.position.x / w; pts += c.position.y / h
                             pts += if (c.pressure > 0f) c.pressure else 1f
@@ -78,15 +84,19 @@ fun PageOverlay(
                     while (true) {
                         val ev = awaitPointerEvent()
                         val ch = ev.changes.firstOrNull { it.id == down.id } ?: break
+                        // событие забрал родитель (щипок/панорама двумя пальцами) — это не штрих
+                        if (ch.isConsumed) { cancelled = true; break }
                         if (!ch.pressed) break
                         handle(ch); ch.consume()
                     }
-                    if (tool == Tool.ERASER) { if (erased.isNotEmpty()) onErase(erased.toList()) }
-                    else if (pts.size >= 3) {
-                        var arr = pts.toFloatArray()
-                        if (tool == Tool.UNDERLINE) arr = snapUnderline(arr)
-                        else if (arr.size == 3) arr += arr   // тап пером = точка
-                        onStroke(arr)
+                    if (!cancelled) {
+                        if (tool == Tool.ERASER) { if (erased.isNotEmpty()) onEraseS(erased.toList()) }
+                        else if (pts.size >= 3) {
+                            var arr = pts.toFloatArray()
+                            if (tool == Tool.UNDERLINE) arr = snapUnderline(arr)
+                            else if (arr.size == 3) arr += arr   // тап пером = точка
+                            onStrokeS(arr)
+                        }
                     }
                     live.clear()
                 }
