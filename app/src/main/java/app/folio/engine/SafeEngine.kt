@@ -85,23 +85,46 @@ class SafeEngine(val raw: DocumentEngine) {
                 val mainKey = "m$g:$i:$mainPx"
                 val cached = finalCache.get(mainKey)
                 if (cached != null) return cached
-                read {
-                    if (closed || g != gen) throw CancellationException("layout changed")
-                    // draft: быстрый RGB_565 low-res, потом final ARGB_8888
-                    if (draftPx > 0 && draftPx < mainPx) {
-                        val d = withContext(Dispatchers.Default) { raw.renderPageDraft(i, draftPx) }
-                        draftCache.put("d$g:$i:$draftPx", d)
-                        val m = withContext(Dispatchers.Default) { raw.renderPage(i, mainPx) }
-                        finalCache.put(mainKey, m)
-                        m
-                    } else {
-                        val m = withContext(Dispatchers.Default) { raw.renderPage(i, mainPx) }
-                        finalCache.put(mainKey, m)
-                        m
+                // ВАЖНО: read-лок берём ТОЛЬКО вокруг самой нативной операции.
+                // layout()/close() тоже берут write-лок; если держать его на всём блоке
+                // (включая withContext и вложенный draft-рендер), возможна взаимная
+                // блокировка: coroutine удерживает read-lock между точками подвески.
+                if (draftPx > 0 && draftPx < mainPx) {
+                    val d = withContext(Dispatchers.IO) {
+                        read { check(!closed && g == gen) { "layout changed" }; raw.renderPageDraft(i, draftPx) }
                     }
+                    draftCache.put("d$g:$i:$draftPx", d)
+                    val m = withContext(Dispatchers.IO) {
+                        read { check(!closed && g == gen) { "layout changed" }; raw.renderPage(i, mainPx) }
+                    }
+                    finalCache.put(mainKey, m)
+                    m
+                } else {
+                    val m = withContext(Dispatchers.IO) {
+                        read { check(!closed && g == gen) { "layout changed" }; raw.renderPage(i, mainPx) }
+                    }
+                    finalCache.put(mainKey, m)
+                    m
                 }
             }
         }
+
+    /** Только черновой кадр (миниатюры, превью) — не вытесняет чистые кадры из final-кэша. */
+    suspend fun renderDraft(i: Int, px: Int): Bitmap {
+        val g = gen
+        val key = "d$g:$i:$px"
+        draftCache.get(key)?.let { return it }
+        return permits.withPermit {
+            pageLocks[i % RENDER_PARALLELISM].withLock {
+                draftCache.get(key)?.let { return it }
+                val d = withContext(Dispatchers.IO) {
+                    read { check(!closed && g == gen) { "layout changed" }; raw.renderPageDraft(i, px) }
+                }
+                draftCache.put(key, d)
+                d
+            }
+        }
+    }
 
     /** Фоновая предвыборка ±PREFETCH_RANGE страниц на низких разрешениях (draft-кэш). */
     fun prefetch(scope: CoroutineScope, visible: Int, total: Int, px: Int): Job = scope.launch(Dispatchers.Default) {
@@ -109,7 +132,7 @@ class SafeEngine(val raw: DocumentEngine) {
         val hi = (visible + PREFETCH_RANGE).coerceAtMost(total - 1)
         val smallPx = minOf(px, 900)
         for (i in hi downTo lo) {          // сначала ближайшая к краю просмотра
-            if (!isActive) break
+            if (!isActive || closed) break
             val key = "d$gen:$i:$smallPx"
             if (draftCache.get(key) != null || finalCache.get("m$gen:$i:$px") != null) continue
             runCatching { render(i, px, smallPx) }
@@ -129,20 +152,46 @@ class SafeEngine(val raw: DocumentEngine) {
     /**
      * Постраничный отменяемый поиск: выдаёт partial-результаты по мере сканирования,
      * держит read-лок только на время страницы (не на весь документ!).
+     * Исключения движка (зашифрованные/битые страницы) не роняют весь скан.
      */
     suspend fun searchPaged(q: String, limit: Int, onPartial: (Hit) -> Unit) = withContext(Dispatchers.Default) {
         var total = 0
         var i = 0
-        while (i < pageCount() && total < limit) {
-            if (!isActive) break
-            val hit = read { runCatching { raw.searchPage(i, q) }.getOrNull() }
+        val n = pageCount()
+        while (i < n && total < limit) {
+            if (!isActive || closed) break
+            // read берём строго вокруг нативного вызова, без точек подвески внутри
+            val hit = try {
+                read { runCatching { raw.searchPage(i, q) }.getOrNull() }
+            } catch (_: CancellationException) { break }
             hit?.let { onPartial(it); total += it.rects.size }
             i++
         }
     }
 
-    suspend fun toc(): List<TocItem> = write { withContext(Dispatchers.Default) { raw.toc() } }
-    suspend fun unlock(pw: String): Boolean = write { withContext(Dispatchers.Default) { raw.unlock(pw) } }
+    suspend fun toc(): List<TocItem> = write { withContext(Dispatchers.IO) { runCatching { raw.toc() }.getOrDefault(emptyList()) } }
+    suspend fun unlock(pw: String): Boolean = write { withContext(Dispatchers.IO) { runCatching { raw.unlock(pw) }.getOrDefault(false) } }
     fun pageCount(): Int = read { raw.pageCount }
-    fun close() = write { closed = true; raw.close() }
+
+    /**
+     * Закрытие: сначала инвалидируем всё (гасим кэш, поднимаем gen — активные рендеры
+     * самоотменятся на проверке g==gen), затем дожидаемся отпускания read-локов с
+     * таймаутом и только потом освобождаем нативный документ. Раньше doc.destroy()
+     * мог случиться посреди активного renderPage → SIGSEGV в MuPDF.
+     */
+    fun close() {
+        if (closed) return
+        closed = true
+        gen++                                  // все in-flight рендеры самоотменятся на check(g==gen)
+        draftCache.evictAll(); finalCache.evictAll()
+        val wl = rw.writeLock()
+        var acquired = false
+        try {
+            acquired = try { wl.tryLock(2, java.util.concurrent.TimeUnit.SECONDS) } catch (_: InterruptedException) { false }
+            if (!acquired) Thread.currentThread().interrupt()
+        } finally {
+            runCatching { raw.close() }        // закрываем в любом случае: после gen++/evictAll новых обращений не будет
+            if (acquired) wl.unlock()
+        }
+    }
 }

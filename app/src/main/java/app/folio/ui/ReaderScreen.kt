@@ -161,11 +161,11 @@ private fun ReaderContent(vm: ReaderViewModel, st: ReaderState, onBack: () -> Un
                             } while (ev.changes.any { it.pressed })
                         }
                     }
-                    // chrome-toggle по тапу живёт ВНУТРИ overlay: одиночный тап по странице
-                    // скрывает панели, а во время письма/ластикования жест уже сконсьюмен
-                    // штрихом и до tap-детектора не доходит (фикс бага «панели прыгают при письме»)
-                    .pointerInput(Unit) { detectTapGestures(onDoubleTap = null) { chrome = !chrome } }
-            ) {
+        // chrome-toggle по тапу живёт ВНУТРИ overlay: одиночный тап по странице
+        // скрывает панели, а во время письма/ластикования жест уже сконсьюмен
+        // штрихом и до tap-детектора не доходит (фикс бага «панели прыгают при письме»).
+        // Поэтому повторный global-tap здесь НЕ вешаем — он конфликтовал бы с overlay.
+    ) {
                 Box(Modifier.fillMaxSize().horizontalScroll(rememberScrollState())) {
                     LazyColumn(
                         state = listState,

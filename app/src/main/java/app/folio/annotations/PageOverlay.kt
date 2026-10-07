@@ -15,11 +15,14 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke as DrawStroke
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
@@ -59,13 +62,22 @@ fun PageOverlay(
     var liveWidths by remember { mutableStateOf<List<Float>>(emptyList()) }   // pressure-based widths
     var erasePos by remember { mutableStateOf<Offset?>(null) }
     val cur by rememberUpdatedState(strokes)
+    val curColor by rememberUpdatedState(color)
+    val curTool by rememberUpdatedState(tool)
     val noteR = with(LocalDensity.current) { 12.dp.toPx() }
     val eraseR = with(LocalDensity.current) { 14.dp.toPx() }
     val minStep = with(LocalDensity.current) { 1.5.dp.toPx() }
 
     // pending: не даём «съесть» свежий штрих, пока Room ещё не вернул его в поток
     val localIds = remember { mutableStateMapOf<Long, Stroke>() }
-    LaunchedEffect(strokes) { localIds.keys.retainAll { id -> strokes.none { it.id == id } } }
+    LaunchedEffect(strokes) {
+        val inDb = strokes.map { it.id }.toHashSet()
+        localIds.keys.filterTo(ArrayList()) { it >= 0 && it in inDb }.forEach { localIds.remove(it) }
+        localIds.keys.retainAll { it < 0 || it !in inDb }   // temp-штрихи чистим по таймауту ниже
+    }
+    LaunchedEffect(localIds.size) {
+        if (localIds.isNotEmpty()) { delay(1500); localIds.keys.filterTo(ArrayList()) { it < 0 }.forEach { localIds.remove(it) } }
+    }
     val allStrokes = if (localIds.isEmpty()) strokes else strokes + localIds.values
 
     Canvas(
@@ -86,9 +98,9 @@ fun PageOverlay(
                     // 2) Основной цикл живёт в Main-пассе: однопальцевое/перовое письмо доходит
                     //    сюда нетронутым, т.к. родитель консьюмит изменения ТОЛЬКО при 2+ пальцах.
                     val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                    if (!isStrokePointer(down, stylusOnly)) return@awaitEachGesture // выход без consume — жест отдаётся родителю/скроллу
                     var ev = awaitPointerEvent(PointerEventPass.Main)
                     if (ev.changes.count { it.pressed } >= 2) return@awaitEachGesture // pinch перехвачен родителем
-                    if (!isStrokePointer(down, stylusOnly)) return@awaitEachGesture   // выход без consume — договорённый
                     down.consume()
                     val w = size.width.toFloat(); val h = size.height.toFloat()
                     val pts = ArrayList<Float>()
@@ -96,11 +108,12 @@ fun PageOverlay(
                     val widths = ArrayList<Float>()
                     val erased = HashSet<Long>()
                     fun addPoint(c: PointerInputChange) {
-                        val p = Offset(c.position.x / w, c.position.y / h)
                         if (tool == Tool.ERASER) {
+                            erasePos = c.position   // видимый индикатор радиуса ластика
                             for (s in cur) if (s.id !in erased && hitStroke(s, c.position, w, h, eraseR)) erased += s.id
                             return
                         }
+                        val p = Offset(c.position.x / w, c.position.y / h)
                         val last = screen.lastOrNull()
                         if (last != null && hypot(c.position.x - last.x, c.position.y - last.y) < minStep) return // редукция
                         val pr = if (c.pressure > 0f) c.pressure else 1f
@@ -125,7 +138,9 @@ fun PageOverlay(
                     } else if (pts.size >= 3) {
                         var arr = pts.toFloatArray()
                         if (tool == Tool.UNDERLINE) arr = snapUnderline(arr)
-                        else if (arr.size == 3) arr += arr   // тап пером = точка
+                        else if (arr.size == 3) arr = floatArrayOf(arr[0], arr[1], 1f)   // тап пером = точка
+                        // держим штрих локально до прихода из Room — без «исчезновения на миг»
+                        localIds[-System.nanoTime()] = Stroke(-1L, 0, curTool.name, curColor.toArgb(), curTool.width, arr, null)
                         onStroke(arr)
                     }
                 }
@@ -149,6 +164,12 @@ fun PageOverlay(
             }
             if (livePts.size >= 2) drawInkPressure(tool.name, color, livePts, liveWidths)
             else if (livePts.size == 1) drawCircle(color, max(1.5f, tool.width * w), livePts[0])
+        } else {
+            // ластик: чернила не перекрываем — только индикатор радиуса действия
+            erasePos?.let { c ->
+                drawCircle(Color(0x33FF5252), eraseR, c)
+                drawCircle(Color(0xFFFF5252), eraseR, c, style = DrawStroke(2f))
+            }
         }
     }
 }
