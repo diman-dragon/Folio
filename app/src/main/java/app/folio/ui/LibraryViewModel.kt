@@ -11,6 +11,7 @@ import androidx.work.WorkManager
 import app.folio.data.BookEntity
 import app.folio.data.Graph
 import app.folio.data.ScanWorker
+import app.folio.engine.Formats
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -28,7 +29,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     val books: StateFlow<List<BookEntity>> =
         combine(dao.observeAll(), query, sort, filter, onlyFav) { all, q, s, f, fav ->
             val list = all.filter {
-                (f == null || app.folio.engine.Formats.group(it.ext) == f) && (!fav || it.favorite) &&
+                (f == null || Formats.group(it.ext) == f) && (!fav || it.favorite) &&
                     (q.isBlank() || it.displayTitle.contains(q, true) || it.author?.contains(q, true) == true)
             }
             when (s) {
