@@ -1,0 +1,8 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    { "label": "build debug", "type": "shell", "command": "./gradlew :app:assembleDebug", "group": "build" },
+    { "label": "install on device", "type": "shell", "command": "./gradlew :app:installDebug", "group": "build" },
+    { "label": "logcat", "type": "shell", "command": "adb logcat -v time AndroidRuntime:E *:S", "isBackground": true }
+  ]
+}
