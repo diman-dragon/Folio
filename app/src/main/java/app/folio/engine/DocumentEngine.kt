@@ -24,8 +24,8 @@ interface DocumentEngine : AutoCloseable {
     fun renderPatch(index: Int, fullWidthPx: Int, x0: Int, y0: Int, x1: Int, y1: Int): Bitmap
     fun toc(): List<TocItem>
     fun searchPage(index: Int, query: String): Hit?
-    /** Строки текста между двумя точками (нормализованные координаты) -> прямоугольники x0,y0,x1,y1. Пусто, если текстового слоя нет. */
-    fun textQuads(index: Int, ax: Float, ay: Float, bx: Float, by: Float): List<FloatArray>
+    /** Выделение текста по символам/словам/предложениям (TextSelect.FREE/WORD/SENTENCE). null — текстового слоя под точкой нет. */
+    fun selectText(index: Int, ax: Float, ay: Float, bx: Float, by: Float, mode: Int): TextSelection?
     fun title(): String?
     fun author(): String?
 }

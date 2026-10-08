@@ -1,6 +1,9 @@
 package app.folio.ui
 
 import android.app.Application
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -150,20 +153,32 @@ class ReaderViewModel(app: Application) : AndroidViewModel(app) {
         undoStack.addLast(id)
     }
 
-    /** Выделение/подчёркивание по словам: строки текста между двумя точками. */
-    fun addTextMarkup(page: Int, tool: Tool, color: Int, ax: Float, ay: Float, bx: Float, by: Float) = viewModelScope.launch {
+    /**
+     * Выделение / подчёркивание / копирование по тексту. mode: TextSelect.WORD / SENTENCE / FREE.
+     * Тап (a == b) выделяет слово или предложение под пальцем, протяжка — диапазон.
+     */
+    fun addTextMarkup(page: Int, tool: Tool, color: Int, ax: Float, ay: Float, bx: Float, by: Float, mode: Int) = viewModelScope.launch {
         val s = _state.value
         val se = s.engine ?: return@launch
-        val rects = try { se.textQuads(page, ax, ay, bx, by) } catch (t: Throwable) { emptyList<FloatArray>() }
-        if (rects.isEmpty()) {
-            toast.tryEmit("Текстового слоя здесь нет — используйте «Маркер» или «Перо»")
+        val sel = try { se.selectText(page, ax, ay, bx, by, mode) } catch (t: Throwable) { null }
+        if (sel == null || sel.rects.isEmpty()) {
+            toast.tryEmit("Текст не найден. У сканов текстового слоя нет — используйте «Маркер» или «Перо»")
             return@launch
         }
-        val arr = FloatArray(rects.size * 4) { rects[it / 4][it % 4] }
+        if (tool == Tool.TEXT_COPY) {
+            val ctx = getApplication<Application>()
+            val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            cm.setPrimaryClip(ClipData.newPlainText("Folio", sel.text))
+            val preview = if (sel.text.length > 60) sel.text.take(60) + "…" else sel.text
+            toast.tryEmit("Скопировано: $preview")
+            return@launch
+        }
+        val arr = FloatArray(sel.rects.size * 4) { sel.rects[it / 4][it % 4] }
         val id = db.annotations().insert(
             AnnotationEntity(docHash = s.hash, page = page, layoutKey = s.layoutKey,
                 type = if (tool == Tool.TEXT_HL) "TEXT_HL" else "TEXT_UL",
-                color = color, width = 0f, points = arr.encode(), created = System.currentTimeMillis())
+                color = color, width = 0f, points = arr.encode(), text = sel.text,
+                created = System.currentTimeMillis())
         )
         undoStack.addLast(id)
     }

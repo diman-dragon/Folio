@@ -7,7 +7,9 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
@@ -28,6 +30,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.automirrored.filled.Undo
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Search
@@ -58,6 +61,7 @@ import app.folio.data.BookEntity
 import app.folio.engine.FormKind
 import app.folio.engine.PageSize
 import app.folio.engine.SafeEngine
+import app.folio.engine.TextSelect
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
@@ -99,7 +103,12 @@ private fun ReaderContent(vm: ReaderViewModel, st: ReaderState, onBack: () -> Un
     var paged by remember { mutableStateOf(prefs.getBoolean("paged", true)) }   // по страницам / лента
     var tool by remember { mutableStateOf(Tool.NONE) }
     var color by remember { mutableIntStateOf(Palette[0]) }
-    var stylusOnly by remember { mutableStateOf(false) }
+    var stylusOnly by remember { mutableStateOf(Settings.stylusOnly) }
+    var pinned by remember { mutableStateOf(prefs.getBoolean("tools_pinned", false)) }   // панель инструментов закреплена
+    var toolsOpen by remember { mutableStateOf(prefs.getBoolean("tools_pinned", false)) } // по умолчанию спрятана
+    var selMode by remember { mutableIntStateOf(TextSelect.WORD) }                        // слово / предложение / свободно
+    var showNotes by remember { mutableStateOf(false) }
+    var showSettings by remember { mutableStateOf(false) }
     var chrome by remember { mutableStateOf(true) }
     var showThumbs by remember { mutableStateOf(false) }   // миниатюры скрыты по умолчанию
     var showToc by remember { mutableStateOf(false) }
@@ -132,6 +141,12 @@ private fun ReaderContent(vm: ReaderViewModel, st: ReaderState, onBack: () -> Un
         anns.filter { it.layoutKey == st.layoutKey }.map { it.toStroke() }.groupBy { it.page }
     }
     val current by remember { derivedStateOf { if (paged) pagerState.currentPage else listState.firstVisibleItemIndex } }
+
+    val notes = remember(byPage) {
+        byPage.values.flatten().filter { it.type == "NOTE" || it.type == "TEXT_HL" || it.type == "TEXT_UL" }.sortedBy { it.page }
+    }
+    val noteCount = notes.count { it.type == "NOTE" }
+    fun collapseTools() { if (!pinned) toolsOpen = false }
 
     fun resetZoom() { scale = 1f; tx = 0f; ty = 0f }
     fun goTo(i: Int) { resetZoom(); scope.launch { if (paged) pagerState.scrollToPage(i) else listState.scrollToItem(i) } }
@@ -205,12 +220,13 @@ private fun ReaderContent(vm: ReaderViewModel, st: ReaderState, onBack: () -> Un
             PageItem(
                 engine, i, st.layoutKey, st.epoch, fit, vwPx, vhPx, tick, sScale, sTx, sTy,
                 byPage[i].orEmpty(), hits[i].orEmpty(), tool, Color(color), stylusOnly,
-                onStroke = { vm.addStroke(i, tool, color, it) },
-                onErase = { d, r -> vm.erase(d, r) },
-                onNoteAt = { x, y -> draft = NoteDraft(i, x, y, null) },
+                onStroke = { collapseTools(); vm.addStroke(i, tool, color, it) },
+                onErase = { d, r -> collapseTools(); vm.erase(d, r) },
+                onNoteAt = { x, y -> collapseTools(); draft = NoteDraft(i, x, y, null) },
                 onNoteOpen = { draft = NoteDraft(i, it.pts[0], it.pts[1], it) },
-                onTextSelect = { ax, ay, bx, by -> vm.addTextMarkup(i, tool, color, ax, ay, bx, by) },
+                onTextSelect = { ax, ay, bx, by -> collapseTools(); vm.addTextMarkup(i, tool, color, ax, ay, bx, by, selMode) },
                 onFormTap = { x, y ->
+                    collapseTools()
                     vm.formProbe(i, x, y) { p ->
                         if (p == null) {
                             Toast.makeText(ctx, "Здесь нет поля формы", Toast.LENGTH_SHORT).show()
@@ -302,67 +318,72 @@ private fun ReaderContent(vm: ReaderViewModel, st: ReaderState, onBack: () -> Un
 
             // ---------- номер страницы ----------
             if (st.pageCount > 0) Surface(
-                Modifier.align(Alignment.BottomEnd).padding(end = 12.dp, bottom = if (chrome) 84.dp else 16.dp),
+                Modifier.align(Alignment.BottomEnd).navigationBarsPadding().padding(end = 12.dp, bottom = 16.dp),
                 shape = RoundedCornerShape(50), color = Color.Black.copy(alpha = 0.6f)
             ) { Text("${current + 1} / ${st.pageCount}", Modifier.padding(10.dp, 4.dp), color = Color.White) }
 
-            // ---------- верхняя панель ----------
-            AnimatedVisibility(chrome, Modifier.align(Alignment.TopCenter), enter = slideInVertically { -it } + fadeIn(), exit = slideOutVertically { -it } + fadeOut()) {
-                TopAppBar(
-                    title = { Text(st.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                    navigationIcon = { IconButton(onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Назад") } },
-                    actions = {
-                        IconButton({ showThumbs = !showThumbs }) { Icon(Icons.Default.GridView, "Миниатюры") }
-                        if (st.toc.isNotEmpty()) IconButton({ showToc = true }) { Icon(Icons.AutoMirrored.Filled.List, "Оглавление") }
-                        IconButton({ showSearch = true }) { Icon(Icons.Default.Search, "Поиск") }
-                        Box {
-                            IconButton({ menu = true }) { Icon(Icons.Default.MoreVert, "Ещё") }
-                            DropdownMenu(menu, { menu = false }) {
-                                DropdownMenuItem(
-                                    text = { Text(if (paged) "Режим: лента" else "Режим: по страницам") },
-                                    onClick = {
-                                        menu = false
-                                        targetPage = current
-                                        resetZoom()
-                                        paged = !paged
-                                        prefs.edit().putBoolean("paged", paged).apply()
-                                    })
-                                if (st.isPdf) {
-                                    DropdownMenuItem(text = { Text("Страницы…") }, onClick = { menu = false; showPages = true })
+            // ---------- шапка: заголовок + раскрывающаяся панель инструментов ----------
+            Column(Modifier.align(Alignment.TopCenter).fillMaxWidth()) {
+                AnimatedVisibility(chrome, enter = slideInVertically { -it } + fadeIn(), exit = slideOutVertically { -it } + fadeOut()) {
+                    TopAppBar(
+                        title = { Text(st.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        navigationIcon = { IconButton(onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Назад") } },
+                        actions = {
+                            IconButton({ toolsOpen = !toolsOpen }) {
+                                Icon(
+                                    Icons.Default.Edit, "Инструменты рисования",
+                                    tint = if (toolsOpen || tool != Tool.NONE) MaterialTheme.colorScheme.primary else LocalContentColor.current
+                                )
+                            }
+                            IconButton({ showThumbs = !showThumbs }) { Icon(Icons.Default.GridView, "Миниатюры") }
+                            if (st.toc.isNotEmpty()) IconButton({ showToc = true }) { Icon(Icons.AutoMirrored.Filled.List, "Оглавление") }
+                            IconButton({ showSearch = true }) { Icon(Icons.Default.Search, "Поиск") }
+                            Box {
+                                IconButton({ menu = true }) { Icon(Icons.Default.MoreVert, "Ещё") }
+                                DropdownMenu(menu, { menu = false }) {
                                     DropdownMenuItem(
-                                        text = { Text("Сохранить PDF с аннотациями") },
-                                        onClick = { menu = false; exportLauncher.launch(st.name.take(60) + "-annotated.pdf") })
+                                        text = { Text("Заметки и выделения (${notes.size})") },
+                                        onClick = { menu = false; showNotes = true })
+                                    DropdownMenuItem(
+                                        text = { Text(if (paged) "Режим: лента" else "Режим: по страницам") },
+                                        onClick = {
+                                            menu = false
+                                            targetPage = current
+                                            resetZoom()
+                                            paged = !paged
+                                            prefs.edit().putBoolean("paged", paged).apply()
+                                        })
+                                    if (st.isPdf) {
+                                        DropdownMenuItem(text = { Text("Страницы…") }, onClick = { menu = false; showPages = true })
+                                        DropdownMenuItem(
+                                            text = { Text("Сохранить PDF с аннотациями") },
+                                            onClick = { menu = false; exportLauncher.launch(st.name.take(60) + "-annotated.pdf") })
+                                    }
+                                    if (st.isReflowable) {
+                                        DropdownMenuItem(text = { Text("Шрифт крупнее") }, onClick = { vm.bumpFont(+2f) })
+                                        DropdownMenuItem(text = { Text("Шрифт мельче") }, onClick = { vm.bumpFont(-2f) })
+                                    }
+                                    DropdownMenuItem(text = { Text("Сбросить зум") }, onClick = { resetZoom(); menu = false })
+                                    DropdownMenuItem(text = { Text("Настройки") }, onClick = { menu = false; showSettings = true })
                                 }
-                                if (st.isReflowable) {
-                                    DropdownMenuItem(text = { Text("Шрифт крупнее") }, onClick = { vm.bumpFont(+2f) })
-                                    DropdownMenuItem(text = { Text("Шрифт мельче") }, onClick = { vm.bumpFont(-2f) })
-                                }
-                                DropdownMenuItem(text = { Text("Сбросить зум") }, onClick = { resetZoom(); menu = false })
                             }
                         }
-                    }
-                )
-            }
-
-            // ---------- панель аннотаций ----------
-            AnimatedVisibility(chrome, Modifier.align(Alignment.BottomCenter), enter = slideInVertically { it } + fadeIn(), exit = slideOutVertically { it } + fadeOut()) {
-                Surface(tonalElevation = 3.dp) {
-                    Row(
-                        Modifier.navigationBarsPadding().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp, vertical = 6.dp),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Tool.entries.forEach { t -> FilterChip(tool == t, { tool = t }, { Text(t.label) }) }
-                        Spacer(Modifier.width(4.dp))
-                        Palette.forEach { c ->
-                            Box(
-                                Modifier.size(28.dp).clip(CircleShape).background(Color(c))
-                                    .border(if (c == color) 3.dp else 1.dp, if (c == color) MaterialTheme.colorScheme.primary else Color.Gray, CircleShape)
-                                    .clickable { color = c }
-                            )
-                        }
-                        IconButton({ vm.undo() }) { Icon(Icons.AutoMirrored.Filled.Undo, "Отменить") }
-                        FilterChip(stylusOnly, { stylusOnly = !stylusOnly }, { Text("Только стилус") })
-                    }
+                    )
+                }
+                AnimatedVisibility(
+                    toolsOpen && (chrome || pinned),
+                    enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()
+                ) {
+                    ToolsPanel(
+                        tool = tool, onTool = { tool = it },
+                        color = color, onColor = { color = it },
+                        selMode = selMode, onSelMode = { selMode = it },
+                        stylusOnly = stylusOnly, onStylusOnly = { stylusOnly = !stylusOnly },
+                        pinned = pinned,
+                        onPin = { pinned = !pinned; prefs.edit().putBoolean("tools_pinned", pinned).apply() },
+                        onUndo = { vm.undo() },
+                        modifier = if (chrome) Modifier else Modifier.statusBarsPadding()
+                    )
                 }
             }
 
@@ -372,7 +393,7 @@ private fun ReaderContent(vm: ReaderViewModel, st: ReaderState, onBack: () -> Un
                     val ts = rememberLazyListState()
                     LaunchedEffect(Unit) { ts.scrollToItem(current) }
                     LazyColumn(
-                        state = ts, contentPadding = PaddingValues(8.dp, 72.dp, 8.dp, 88.dp),
+                        state = ts, contentPadding = PaddingValues(8.dp, 72.dp, 8.dp, 24.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp), horizontalAlignment = Alignment.CenterHorizontally
                     ) {
                         items(st.pageCount, key = { "${st.layoutKey}:${st.epoch}:t$it" }) { i ->
@@ -421,6 +442,15 @@ private fun ReaderContent(vm: ReaderViewModel, st: ReaderState, onBack: () -> Un
             onDelete = { d.existing?.let { vm.deleteAnnotations(listOf(it.id)) }; draft = null },
             onDismiss = { draft = null })
     }
+
+    if (showSettings) SettingsDialog { showSettings = false }
+
+    if (showNotes) NotesDialog(
+        list = notes,
+        onGo = { p -> showNotes = false; goTo(p) },
+        onEdit = { n -> showNotes = false; goTo(n.page); draft = NoteDraft(n.page, n.pts[0], n.pts[1], n) },
+        onDelete = { n -> vm.deleteAnnotations(listOf(n.id)) },
+        onDismiss = { showNotes = false })
 
     if (showPages) AlertDialog(
         onDismissRequest = { showPages = false },
@@ -625,4 +655,79 @@ private fun SearchDialog(
         },
         confirmButton = { TextButton({ onSearch(q) }) { Text("Найти") } },
         dismissButton = { TextButton({ onClear(); onDismiss() }) { Text("Сбросить") } })
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ToolsPanel(
+    tool: Tool, onTool: (Tool) -> Unit, color: Int, onColor: (Int) -> Unit,
+    selMode: Int, onSelMode: (Int) -> Unit, stylusOnly: Boolean, onStylusOnly: () -> Unit,
+    pinned: Boolean, onPin: () -> Unit, onUndo: () -> Unit, modifier: Modifier = Modifier
+) {
+    Surface(modifier.fillMaxWidth(), tonalElevation = 3.dp, shadowElevation = 4.dp) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Tool.entries.forEach { t -> FilterChip(tool == t, { onTool(t) }, { Text(t.label) }) }
+            }
+            if (tool.isTextTool) {
+                Text("Что выделять:", style = MaterialTheme.typography.labelMedium)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    FilterChip(selMode == TextSelect.WORD, { onSelMode(TextSelect.WORD) }, { Text("Слово") })
+                    FilterChip(selMode == TextSelect.SENTENCE, { onSelMode(TextSelect.SENTENCE) }, { Text("Предложение") })
+                    FilterChip(selMode == TextSelect.FREE, { onSelMode(TextSelect.FREE) }, { Text("Свободно (от точки до точки)") })
+                }
+                Text(
+                    "Коснитесь текста — выделится слово или предложение; проведите вдоль текста — выделится весь фрагмент.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Palette.forEach { c ->
+                    Box(
+                        Modifier.size(28.dp).clip(CircleShape).background(Color(c))
+                            .border(if (c == color) 3.dp else 1.dp, if (c == color) MaterialTheme.colorScheme.primary else Color.Gray, CircleShape)
+                            .clickable { onColor(c) }
+                    )
+                }
+                Spacer(Modifier.weight(1f))
+                TextButton(onUndo) { Text("Отменить последнее") }
+            }
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                FilterChip(stylusOnly, { onStylusOnly() }, { Text("Только стилус") })
+                FilterChip(pinned, { onPin() }, { Text("Закрепить панель") })
+            }
+        }
+    }
+}
+
+@Composable
+private fun NotesDialog(
+    list: List<Stroke>, onGo: (Int) -> Unit, onEdit: (Stroke) -> Unit, onDelete: (Stroke) -> Unit, onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Заметки и выделения") },
+        text = {
+            if (list.isEmpty()) Text("Пока ничего нет. Выберите инструмент «Заметка» и коснитесь страницы.")
+            else LazyColumn(Modifier.heightIn(max = 460.dp)) {
+                items(list, key = { it.id }) { n ->
+                    Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+                        val kind = when (n.type) { "NOTE" -> "Заметка"; "TEXT_HL" -> "Выделение"; else -> "Подчёркивание" }
+                        Text("Страница ${n.page + 1} · $kind", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                        Text(
+                            n.text?.takeIf { it.isNotBlank() } ?: "(без текста)",
+                            maxLines = 4, overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(top = 2.dp)
+                        )
+                        Row {
+                            TextButton({ onGo(n.page) }) { Text("Перейти") }
+                            if (n.type == "NOTE") TextButton({ onEdit(n) }) { Text("Изменить") }
+                            TextButton({ onDelete(n) }) { Text("Удалить") }
+                        }
+                    }
+                    HorizontalDivider()
+                }
+            }
+        },
+        confirmButton = { TextButton(onDismiss) { Text("Закрыть") } })
 }

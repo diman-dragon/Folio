@@ -6,12 +6,16 @@ enum class Tool(val label: String, val width: Float) {
     NONE("Чтение", 0f),
     PEN("Перо", 0.0035f),
     MARKER("Маркер", 0.028f),
-    UNDERLINE("Подчёрк.", 0.003f),
-    TEXT_HL("Выдел. текста", 0f),
-    TEXT_UL("Подч. текста", 0f),
+    UNDERLINE("Подчёркивание", 0.003f),
+    TEXT_HL("Выделение текста", 0f),
+    TEXT_UL("Подчёркивание текста", 0f),
+    TEXT_COPY("Копирование текста", 0f),
     ERASER("Ластик", 0.02f),
     NOTE("Заметка", 0f),
-    FORM("Форма", 0f)
+    FORM("Форма", 0f);
+
+    /** Инструменты, работающие по текстовому слою (слово / предложение / свободно). */
+    val isTextTool: Boolean get() = this == TEXT_HL || this == TEXT_UL || this == TEXT_COPY
 }
 
 val Palette = listOf(0xFFE53935, 0xFFFB8C00, 0xFFFDD835, 0xFF43A047, 0xFF1E88E5, 0xFF000000).map { it.toInt() }
