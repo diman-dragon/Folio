@@ -62,6 +62,11 @@ interface AnnotationDao {
     @Insert suspend fun insert(a: AnnotationEntity): Long
     @Query("UPDATE annotations SET text=:text WHERE id=:id") suspend fun setText(id: Long, text: String)
     @Query("DELETE FROM annotations WHERE id IN (:ids)") suspend fun delete(ids: List<Long>)
+    @Query("SELECT * FROM annotations WHERE docHash=:h AND page=:p") suspend fun onPage(h: String, p: Int): List<AnnotationEntity>
+    @Query("DELETE FROM annotations WHERE docHash=:h AND page=:p") suspend fun deletePage(h: String, p: Int)
+    @Query("DELETE FROM annotations WHERE docHash=:h") suspend fun deleteAll(h: String)
+    @Query("UPDATE annotations SET page = page + :d WHERE docHash=:h AND page > :p") suspend fun shiftAfter(h: String, p: Int, d: Int)
+    @Query("UPDATE annotations SET points=:pts, width=:w WHERE id=:id") suspend fun setGeometry(id: Long, pts: String, w: Float)
 }
 
 @Database(entities = [BookEntity::class, AnnotationEntity::class], version = 1, exportSchema = false)

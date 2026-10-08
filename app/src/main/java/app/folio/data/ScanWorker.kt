@@ -1,12 +1,10 @@
 package app.folio.data
 
 import android.content.Context
-import android.graphics.Bitmap
 import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
 import androidx.work.*
 import app.folio.engine.Formats
-import java.io.File
 
 /** Фоновое сканирование выбранных папок (SAF) + генерация обложек и метаданных. */
 class ScanWorker(ctx: Context, p: WorkerParameters) : CoroutineWorker(ctx, p) {
@@ -14,7 +12,7 @@ class ScanWorker(ctx: Context, p: WorkerParameters) : CoroutineWorker(ctx, p) {
 
     override suspend fun doWork(): Result {
         for (root in Graph.roots) scan(root)
-        for (b in dao.withoutMeta()) { if (isStopped) break; fillMeta(b) }
+        for (b in dao.withoutMeta()) { if (isStopped) break; CoverMaker.make(applicationContext, b) }
         DocumentOpener(applicationContext).trim()
         return Result.success()
     }
@@ -35,22 +33,6 @@ class ScanWorker(ctx: Context, p: WorkerParameters) : CoroutineWorker(ctx, p) {
         dao.insertIgnore(found)
         val seen = found.map { it.uri }.toSet()
         (dao.urisByRoot(root).toSet() - seen).chunked(500).forEach { dao.deleteAll(it) }
-    }
-
-    private suspend fun fillMeta(b: BookEntity) {
-        val ctx = applicationContext
-        try {
-            DocumentOpener(ctx).open(Uri.parse(b.uri), b.name).use { o ->
-                val e = o.engine
-                if (e.needsPassword) { dao.setMeta(b.uri, o.hash, null, null, ""); return }
-                val bmp = e.renderPage(0, 360)
-                val f = File(ctx.filesDir, "covers").apply { mkdirs() }.resolve("${o.hash}.jpg")
-                f.outputStream().use { bmp.compress(Bitmap.CompressFormat.JPEG, 85, it) }
-                dao.setMeta(b.uri, o.hash, e.title(), e.author(), f.path)
-            }
-        } catch (t: Throwable) {
-            dao.setMeta(b.uri, null, null, null, "")
-        }
     }
 
     companion object {

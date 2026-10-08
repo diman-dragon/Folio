@@ -2,8 +2,12 @@ package app.folio.engine
 
 import android.graphics.Bitmap
 import com.artifex.mupdf.fitz.Document
+import com.artifex.mupdf.fitz.Matrix
 import com.artifex.mupdf.fitz.Outline
 import com.artifex.mupdf.fitz.Page
+import com.artifex.mupdf.fitz.Point
+import com.artifex.mupdf.fitz.Quad
+import com.artifex.mupdf.fitz.RectI
 import com.artifex.mupdf.fitz.android.AndroidDrawDevice
 
 /** PDF, EPUB, MOBI, FB2, CBZ, XPS, SVG, TXT, HTML, изображения, DOCX/XLSX/PPTX (MuPDF >= 1.25). */
@@ -48,39 +52,22 @@ class MuPdfEngine(path: String) : DocumentEngine {
         AndroidDrawDevice.drawPageFitWidth(it, widthPx)
     }
 
-    /** Черновой кадр: то же, что final, но в RGB_565 — вдвое меньше alloc/GC на слабых устройствах. */
-    override fun renderPageDraft(index: Int, widthPx: Int): Bitmap = withPage(index) { p ->
-        val src = AndroidDrawDevice.drawPageFitWidth(p, widthPx)
-        try {
-            if (src.config == Bitmap.Config.RGB_565) src
-            else {
-                val out = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.RGB_565)
-                android.graphics.Canvas(out).drawBitmap(src, 0f, 0f, null)
-                src.recycle()
-                out
-            }
-        } catch (t: Throwable) { src }   // если конвертация не удалась — отдаём как есть
-    }
-
-    private fun hitFrom(i: Int, p: Page, query: String): Hit? {
+    override fun renderPatch(index: Int, fullWidthPx: Int, x0: Int, y0: Int, x1: Int, y1: Int): Bitmap = withPage(index) { p ->
         val b = p.bounds
-        val w = b.x1 - b.x0
-        val h = b.y1 - b.y0
-        val res = p.search(query) ?: return null
-        if (res.isEmpty()) return null
-        val rects = res.flatMap { quads ->
-            quads.map { q ->
-                floatArrayOf(
-                    (minOf(q.ul_x, q.ll_x) - b.x0) / w, (minOf(q.ul_y, q.ur_y) - b.y0) / h,
-                    (maxOf(q.ur_x, q.lr_x) - b.x0) / w, (maxOf(q.ll_y, q.lr_y) - b.y0) / h
-                )
-            }
+        val scale = fullWidthPx / (b.x1 - b.x0)
+        val ctm = Matrix(scale)
+        val ibox = RectI(b.transform(ctm))
+        val bmp = Bitmap.createBitmap(maxOf(1, x1 - x0), maxOf(1, y1 - y0), Bitmap.Config.ARGB_8888)
+        // (xOrigin, yOrigin) — положение левого верхнего угла битмапа в пикселях устройства
+        val dev = AndroidDrawDevice(bmp, ibox.x0 + x0, ibox.y0 + y0)
+        try {
+            p.run(dev, ctm, null)
+            dev.close()
+        } finally {
+            dev.destroy()
         }
-        return Hit(i, rects)
+        bmp
     }
-
-    override fun searchPage(index: Int, query: String): Hit? =
-        if (index in 0 until count) withPage(index) { hitFrom(index, it, query) } else null
 
     override fun toc(): List<TocItem> {
         val out = ArrayList<TocItem>()
@@ -95,14 +82,31 @@ class MuPdfEngine(path: String) : DocumentEngine {
         return out
     }
 
-    override fun search(query: String, limit: Int): List<Hit> {
-        val out = ArrayList<Hit>()
-        var total = 0
-        for (i in 0 until count) {
-            if (total >= limit) break
-            searchPage(i, query)?.let { out += it; total += it.rects.size }
+    private fun quadRect(q: Quad, x0: Float, y0: Float, w: Float, h: Float) = floatArrayOf(
+        (minOf(q.ul_x, q.ll_x) - x0) / w, (minOf(q.ul_y, q.ur_y) - y0) / h,
+        (maxOf(q.ur_x, q.lr_x) - x0) / w, (maxOf(q.ll_y, q.lr_y) - y0) / h
+    )
+
+    override fun searchPage(index: Int, query: String): Hit? = withPage(index) { p ->
+        val b = p.bounds
+        val w = b.x1 - b.x0
+        val h = b.y1 - b.y0
+        val res = p.search(query)
+        if (res == null || res.isEmpty()) null
+        else Hit(index, res.flatMap { quads -> quads.map { q -> quadRect(q, b.x0, b.y0, w, h) } })
+    }
+
+    override fun textQuads(index: Int, ax: Float, ay: Float, bx: Float, by: Float): List<FloatArray> = withPage(index) { p ->
+        val b = p.bounds
+        val w = b.x1 - b.x0
+        val h = b.y1 - b.y0
+        val st = p.toStructuredText()
+        try {
+            val qs = st.highlight(Point(b.x0 + ax * w, b.y0 + ay * h), Point(b.x0 + bx * w, b.y0 + by * h))
+            if (qs == null) emptyList() else qs.map { q -> quadRect(q, b.x0, b.y0, w, h) }
+        } finally {
+            st.destroy()
         }
-        return out
     }
 
     override fun title(): String? = doc.getMetaData(Document.META_INFO_TITLE)?.takeIf { it.isNotBlank() }

@@ -13,14 +13,13 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.*
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.calculateZoom
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -37,32 +36,38 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.toArgb
-import androidx.compose.ui.input.pointer.PointerEventPass
-import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.*
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import app.folio.annotations.*
 import app.folio.data.BookEntity
+import app.folio.engine.FormKind
 import app.folio.engine.PageSize
 import app.folio.engine.SafeEngine
 import kotlinx.coroutines.FlowPreview
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
+import kotlin.math.ceil
+import kotlin.math.roundToInt
 
 private class NoteDraft(val page: Int, val x: Float, val y: Float, val existing: Stroke?)
-// Потолок 2400 px оставлен как аварийный; основной путь — fixed-res рендер + GPU-масштаб (graphicsLayer),
-// поэтому перерендер на зум почти не нужен и потолок редко вступает в силу.
+private class Patch(val bmp: Bitmap, val x: Float, val y: Float, val w: Float, val h: Float)
 private const val MAX_RENDER_PX = 2400
-private const val DRAFT_RENDER_PX = 700     // черновой RGB_565 кадр
-private const val THUMB_PX = 160            // миниатюры
+private const val MAX_SCALE = 6f
 
 @Composable
 fun ReaderScreen(book: BookEntity, onBack: () -> Unit) {
@@ -86,103 +91,210 @@ fun ReaderScreen(book: BookEntity, onBack: () -> Unit) {
 @Composable
 private fun ReaderContent(vm: ReaderViewModel, st: ReaderState, onBack: () -> Unit) {
     val engine = st.engine!!
+    val ctx = LocalContext.current
     val density = LocalDensity.current
     val scope = rememberCoroutineScope()
+    val prefs = remember { ctx.getSharedPreferences("folio", 0) }
+
+    var paged by remember { mutableStateOf(prefs.getBoolean("paged", true)) }   // по страницам / лента
     var tool by remember { mutableStateOf(Tool.NONE) }
     var color by remember { mutableIntStateOf(Palette[0]) }
-    var stylusOnly by remember { mutableStateOf(true) }
+    var stylusOnly by remember { mutableStateOf(false) }
     var chrome by remember { mutableStateOf(true) }
     var showThumbs by remember { mutableStateOf(false) }   // миниатюры скрыты по умолчанию
     var showToc by remember { mutableStateOf(false) }
     var showSearch by remember { mutableStateOf(false) }
+    var showPages by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf(false) }
+    var confirmReset by remember { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
-    var zoom by remember { mutableFloatStateOf(1f) }          // визуальный (GPU) зум — мгновенный
-    var renderZoom by remember { mutableFloatStateOf(1f) }    // отложенный перерендер качества
     var draft by remember { mutableStateOf<NoteDraft?>(null) }
+    var formProbe by remember { mutableStateOf<FormProbe?>(null) }
+
+    // трансформация вьюпорта: экран = содержимое * scale + (tx, ty); точка отсчёта — левый верхний угол
+    var scale by remember { mutableFloatStateOf(1f) }
+    var tx by remember { mutableFloatStateOf(0f) }
+    var ty by remember { mutableFloatStateOf(0f) }
+    // «успокоившаяся» трансформация: по ней рендерим чёткие фрагменты (патчи) страниц
+    var sScale by remember { mutableFloatStateOf(1f) }
+    var sTx by remember { mutableFloatStateOf(0f) }
+    var sTy by remember { mutableFloatStateOf(0f) }
+    var tick by remember { mutableIntStateOf(0) }
+    var targetPage by remember { mutableIntStateOf(-1) }
+    var restored by remember { mutableStateOf(false) }
+
     val listState = rememberLazyListState()
+    val pagerState = rememberPagerState { st.pageCount }
     val anns by vm.annotations.collectAsState()
     val hits by vm.hits.collectAsState()
+    val searching by vm.searching.collectAsState()
     val byPage = remember(anns, st.layoutKey) {
         anns.filter { it.layoutKey == st.layoutKey }.map { it.toStroke() }.groupBy { it.page }
     }
-    val current by remember { derivedStateOf { listState.firstVisibleItemIndex } }
+    val current by remember { derivedStateOf { if (paged) pagerState.currentPage else listState.firstVisibleItemIndex } }
 
-    // стабильные лямбды: PageItem не перекомпозируется из-за новых замыканий на каждый кадр
-    val onStroke = remember(vm, tool, color) { { page: Int, pts: FloatArray -> vm.addStroke(page, tool, color, pts) } }
-    val onErase = remember(vm) { { ids: List<Long> -> vm.erase(ids) } }
-    val onNoteAt = remember { { page: Int, x: Float, y: Float -> draft = NoteDraft(page, x, y, null) } }
-    val onNoteOpen = remember { { page: Int, s: Stroke -> draft = NoteDraft(page, s.pts[0], s.pts[1], s) } }
-    val onTapBackground = remember { { chrome = !chrome } }
+    fun resetZoom() { scale = 1f; tx = 0f; ty = 0f }
+    fun goTo(i: Int) { resetZoom(); scope.launch { if (paged) pagerState.scrollToPage(i) else listState.scrollToItem(i) } }
+
+    /** Сдвиг содержимого. В ленте остаток по вертикали уходит в прокрутку списка. */
+    fun panBy(d: Offset, w: Float, h: Float) {
+        val s = scale
+        tx = (tx + d.x).coerceIn(w * (1f - s), 0f)
+        val want = ty + d.y
+        val clamped = want.coerceIn(h * (1f - s), 0f)
+        ty = clamped
+        if (!paged) {
+            val rem = want - clamped
+            if (rem != 0f) listState.dispatchRawDelta(-rem / s)
+        }
+    }
+
+    /** Зум в точке c (координаты вьюпорта): точка под пальцами остаётся на месте. */
+    fun zoomAt(factor: Float, c: Offset, w: Float, h: Float) {
+        val ns = (scale * factor).coerceIn(1f, MAX_SCALE)
+        val k = ns / scale
+        tx = (c.x - (c.x - tx) * k).coerceIn(w * (1f - ns), 0f)
+        ty = (c.y - (c.y - ty) * k).coerceIn(h * (1f - ns), 0f)
+        scale = ns
+    }
 
     val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { u ->
         u?.let { vm.exportPdf(it) }
     }
+    val insertLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { u ->
+        u?.let { vm.insertPdf(current, it) }
+    }
 
     BackHandler(enabled = showThumbs) { showThumbs = false }
-    // GPU-зум мгновенный; перерендер в более высокое разрешение отложен, чтобы не спамить рендер-очередь
-    LaunchedEffect(zoom) { delay(250); renderZoom = zoom }
-    LaunchedEffect(st.layoutKey, st.restorePage) {
-        if (st.pageCount > 0) listState.scrollToItem(st.restorePage.coerceIn(0, st.pageCount - 1))
+    LaunchedEffect(st.layoutKey, st.restorePage, st.epoch) {
+        if (st.pageCount > 0) {
+            restored = false
+            val t = st.restorePage.coerceIn(0, st.pageCount - 1)
+            if (paged) pagerState.scrollToPage(t) else listState.scrollToItem(t)
+            restored = true
+        }
     }
-    LaunchedEffect(Unit) { snapshotFlow { listState.firstVisibleItemIndex }.debounce(700).collect { vm.saveProgress(it) } }
-    // предвыборка соседних страниц при скролле — скролл «летает» без белых кадров
-    var prefetchPx by remember { mutableIntStateOf(0) }
-    LaunchedEffect(current, st.layoutKey, prefetchPx, st.pageCount) {
-        if (prefetchPx > 0 && st.pageCount > 0) engine.prefetch(scope, current, st.pageCount, prefetchPx)
+    LaunchedEffect(paged) {   // переключение режима: остаёмся на той же странице
+        val t = targetPage
+        if (t >= 0 && st.pageCount > 0) {
+            val p = t.coerceIn(0, st.pageCount - 1)
+            if (paged) pagerState.scrollToPage(p) else listState.scrollToItem(p)
+        }
+    }
+    LaunchedEffect(Unit) {
+        snapshotFlow { current }.debounce(700).collect { if (restored) vm.saveProgress(it) }
+    }
+    LaunchedEffect(paged) {   // трансформация/прокрутка «успокоились» на 200 мс -> перерисовать чёткие фрагменты
+        snapshotFlow {
+            val sig = if (paged) pagerState.currentPage * 1_000_000 else listState.firstVisibleItemIndex * 1_000_000 + listState.firstVisibleItemScrollOffset
+            listOf<Any>(scale, tx, ty, sig)
+        }.debounce(200).collect {
+            sScale = scale; sTx = tx; sTy = ty
+            tick++
+        }
     }
 
     BoxWithConstraints(Modifier.fillMaxSize().background(Color(0xFF1E1F22))) {
         val viewW = maxWidth
         val viewH = maxHeight
+        val vwPx = with(density) { viewW.toPx() }
+        val vhPx = with(density) { viewH.toPx() }
         if (st.isReflowable) LaunchedEffect(viewW, viewH) { vm.relayout(viewW.value, viewH.value) }
-        // Ключевое изменение: страница всегда рендерится в фиксированное разрешение ~экрана.
-        // Зум — чистая GPU-трансформация (graphicsLayer.scaleX/Y): мгновенно, без перерендера,
-        // идеально для слабых планшетов (CPU не делает лишней работы вообще).
-        // Перерендер (renderZoom) остаётся только для докачки качества после жеста.
-        val basePx = with(density) { minOf((viewW * renderZoom).roundToPx(), MAX_RENDER_PX) }
-        LaunchedEffect(basePx) { prefetchPx = basePx }
-        val draftPx = with(density) { min(DRAFT_RENDER_PX, (viewW.value * density.density).toInt()) }
 
-        Box(Modifier.fillMaxSize()) {
-            // ---------- страницы ----------
-            Box(
-                Modifier.fillMaxSize()
-                    .pointerInput(tool) {   // щипок двумя пальцами: работает и в режиме рисования
-                        // Только в Initial-пассе и consume() ТОЛЬКО когда реально 2+ пальца:
-                        // одно-перевой жест доходит до PageOverlay (Main) нетронутым.
-                        awaitEachGesture {
-                            awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
-                            do {
-                                val ev = awaitPointerEvent(PointerEventPass.Initial)
-                                if (ev.changes.count { it.pressed } >= 2) {
-                                    val z = ev.calculateZoom()
-                                    if (z != 1f) { zoom = (zoom * z).coerceIn(1f, 4f); ev.changes.forEach { it.consume() } }
-                                }
-                            } while (ev.changes.any { it.pressed })
+        val pageUi: @Composable (Int, Boolean) -> Unit = { i, fit ->
+            PageItem(
+                engine, i, st.layoutKey, st.epoch, fit, vwPx, vhPx, tick, sScale, sTx, sTy,
+                byPage[i].orEmpty(), hits[i].orEmpty(), tool, Color(color), stylusOnly,
+                onStroke = { vm.addStroke(i, tool, color, it) },
+                onErase = { d, r -> vm.erase(d, r) },
+                onNoteAt = { x, y -> draft = NoteDraft(i, x, y, null) },
+                onNoteOpen = { draft = NoteDraft(i, it.pts[0], it.pts[1], it) },
+                onTextSelect = { ax, ay, bx, by -> vm.addTextMarkup(i, tool, color, ax, ay, bx, by) },
+                onFormTap = { x, y ->
+                    vm.formProbe(i, x, y) { p ->
+                        if (p == null) {
+                            Toast.makeText(ctx, "Здесь нет поля формы", Toast.LENGTH_SHORT).show()
+                        } else {
+                            formProbe = p
                         }
                     }
-        // chrome-toggle по тапу живёт ВНУТРИ overlay: одиночный тап по странице
-        // скрывает панели, а во время письма/ластикования жест уже сконсьюмен
-        // штрихом и до tap-детектора не доходит (фикс бага «панели прыгают при письме»).
-        // Поэтому повторный global-tap здесь НЕ вешаем — он конфликтовал бы с overlay.
-    ) {
-                Box(Modifier.fillMaxSize().horizontalScroll(rememberScrollState())) {
-                    LazyColumn(
-                        state = listState,
-                        modifier = Modifier.width(viewW * zoom).fillMaxHeight(),
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
-                        contentPadding = PaddingValues(vertical = 6.dp)
-                    ) {
-                        items(st.pageCount, key = { "${st.layoutKey}:$it" }, contentType = { "page" }) { i ->
-                            PageItem(
-                                engine, i, st.layoutKey, basePx, draftPx,
-                                byPage[i].orEmpty(), hits[i].orEmpty(), tool, Color(color), stylusOnly,
-                                onStroke = { pts -> onStroke(i, pts) },
-                                onErase = onErase,
-                                onNoteAt = { x, y -> onNoteAt(i, x, y) },
-                                onNoteOpen = { s -> onNoteOpen(i, s) },
-                                onTapBackground = onTapBackground
-                            )
+                },
+                onTapBackground = { chrome = !chrome }
+            )
+        }
+
+        Box(Modifier.fillMaxSize()) {
+            // ---------- страницы + жесты зума ----------
+            Box(
+                Modifier.fillMaxSize()
+                    .pointerInput(tool, stylusOnly, paged) {
+                        var lastTapTime = 0L
+                        var lastTapPos = Offset.Zero
+                        val slop = viewConfiguration.touchSlop
+                        awaitEachGesture {
+                            val first = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                            val w = size.width.toFloat()
+                            val h = size.height.toFloat()
+                            var moved = false
+                            var multi = false
+                            var lastUp = first.uptimeMillis
+                            do {
+                                val ev = awaitPointerEvent(PointerEventPass.Initial)
+                                lastUp = ev.changes[0].uptimeMillis
+                                val pressed = ev.changes.filter { it.pressed }
+                                if (pressed.size >= 2) {
+                                    multi = true
+                                    val z = ev.calculateZoom()
+                                    val c = ev.calculateCentroid()
+                                    val p = ev.calculatePan()
+                                    if (z != 1f || p != Offset.Zero) {
+                                        zoomAt(z, c, w, h)
+                                        panBy(p, w, h)
+                                        ev.changes.forEach { it.consume() }
+                                    }
+                                } else if (!multi && scale > 1f && pressed.size == 1) {
+                                    val ch = pressed[0]
+                                    val canPan = tool == Tool.NONE || (stylusOnly && ch.type != PointerType.Stylus)
+                                    val d = ch.positionChange()
+                                    if (canPan && d != Offset.Zero) { panBy(d, w, h); ch.consume(); moved = true }
+                                }
+                                if (!moved && (ev.changes[0].position - first.position).getDistance() > slop) moved = true
+                            } while (ev.changes.any { it.pressed })
+
+                            // двойной тап: зум в точку / сброс
+                            if (tool == Tool.NONE && !multi && !moved && lastUp - first.uptimeMillis < 300) {
+                                if (first.uptimeMillis - lastTapTime < 350 && (first.position - lastTapPos).getDistance() < 120f) {
+                                    lastTapTime = 0L
+                                    if (scale > 1f) resetZoom() else zoomAt(2.5f, first.position, w, h)
+                                } else { lastTapTime = lastUp; lastTapPos = first.position }
+                            }
+                            // стилус замечен -> дальше палец не рисует (защита от ладони); срабатывает после жеста, чтобы не прервать штрих
+                            if (first.type == PointerType.Stylus && tool != Tool.NONE && !stylusOnly) stylusOnly = true
+                        }
+                    }
+                    .pointerInput(Unit) { detectTapGestures { chrome = !chrome } }
+            ) {
+                Box(
+                    Modifier.fillMaxSize().graphicsLayer {
+                        transformOrigin = TransformOrigin(0f, 0f)
+                        scaleX = scale; scaleY = scale
+                        translationX = tx; translationY = ty
+                    }
+                ) {
+                    if (paged) {
+                        HorizontalPager(
+                            state = pagerState, modifier = Modifier.fillMaxSize(),
+                            userScrollEnabled = scale <= 1.01f,
+                            beyondViewportPageCount = 1,
+                            key = { "${st.layoutKey}:${st.epoch}:$it" }
+                        ) { i -> pageUi(i, true) }
+                    } else {
+                        LazyColumn(
+                            state = listState, modifier = Modifier.fillMaxSize(),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                            contentPadding = PaddingValues(vertical = 6.dp)
+                        ) {
+                            items(st.pageCount, key = { "${st.layoutKey}:${st.epoch}:$it" }) { i -> pageUi(i, false) }
                         }
                     }
                 }
@@ -206,14 +318,26 @@ private fun ReaderContent(vm: ReaderViewModel, st: ReaderState, onBack: () -> Un
                         Box {
                             IconButton({ menu = true }) { Icon(Icons.Default.MoreVert, "Ещё") }
                             DropdownMenu(menu, { menu = false }) {
-                                if (st.isPdf) DropdownMenuItem(
-                                    text = { Text("Сохранить PDF с аннотациями") },
-                                    onClick = { menu = false; exportLauncher.launch(st.name.take(60) + "-annotated.pdf") })
+                                DropdownMenuItem(
+                                    text = { Text(if (paged) "Режим: лента" else "Режим: по страницам") },
+                                    onClick = {
+                                        menu = false
+                                        targetPage = current
+                                        resetZoom()
+                                        paged = !paged
+                                        prefs.edit().putBoolean("paged", paged).apply()
+                                    })
+                                if (st.isPdf) {
+                                    DropdownMenuItem(text = { Text("Страницы…") }, onClick = { menu = false; showPages = true })
+                                    DropdownMenuItem(
+                                        text = { Text("Сохранить PDF с аннотациями") },
+                                        onClick = { menu = false; exportLauncher.launch(st.name.take(60) + "-annotated.pdf") })
+                                }
                                 if (st.isReflowable) {
                                     DropdownMenuItem(text = { Text("Шрифт крупнее") }, onClick = { vm.bumpFont(+2f) })
                                     DropdownMenuItem(text = { Text("Шрифт мельче") }, onClick = { vm.bumpFont(-2f) })
                                 }
-                                DropdownMenuItem(text = { Text("Сбросить зум") }, onClick = { zoom = 1f; menu = false })
+                                DropdownMenuItem(text = { Text("Сбросить зум") }, onClick = { resetZoom(); menu = false })
                             }
                         }
                     }
@@ -251,13 +375,15 @@ private fun ReaderContent(vm: ReaderViewModel, st: ReaderState, onBack: () -> Un
                         state = ts, contentPadding = PaddingValues(8.dp, 72.dp, 8.dp, 88.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp), horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        items(st.pageCount, key = { "${st.layoutKey}:t$it" }) { i ->
-                            Thumb(engine, i, st.layoutKey, i == current, byPage[i]?.isNotEmpty() == true) {
-                                scope.launch { listState.scrollToItem(i) }
-                            }
+                        items(st.pageCount, key = { "${st.layoutKey}:${st.epoch}:t$it" }) { i ->
+                            Thumb(engine, i, st.layoutKey, st.epoch, i == current, byPage[i]?.isNotEmpty() == true) { goTo(i) }
                         }
                     }
                 }
+            }
+
+            if (st.busy) Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.35f)), Alignment.Center) {
+                CircularProgressIndicator()
             }
         }
     }
@@ -271,7 +397,7 @@ private fun ReaderContent(vm: ReaderViewModel, st: ReaderState, onBack: () -> Un
                 items(st.toc) { t ->
                     Text(
                         t.title.ifBlank { "—" },
-                        Modifier.fillMaxWidth().clickable { showToc = false; scope.launch { listState.scrollToItem(t.page.coerceAtLeast(0)) } }
+                        Modifier.fillMaxWidth().clickable { showToc = false; goTo(t.page.coerceAtLeast(0)) }
                             .padding(start = (t.level * 16).dp, top = 10.dp, bottom = 10.dp),
                         maxLines = 2, overflow = TextOverflow.Ellipsis
                     )
@@ -280,8 +406,8 @@ private fun ReaderContent(vm: ReaderViewModel, st: ReaderState, onBack: () -> Un
         })
 
     if (showSearch) SearchDialog(
-        hits, onSearch = vm::search, onClear = vm::clearSearch,
-        onGo = { p -> showSearch = false; scope.launch { listState.scrollToItem(p) } },
+        hits, searching, onSearch = vm::search, onClear = vm::clearSearch,
+        onGo = { p -> showSearch = false; goTo(p) },
         onDismiss = { showSearch = false })
 
     draft?.let { d ->
@@ -292,39 +418,123 @@ private fun ReaderContent(vm: ReaderViewModel, st: ReaderState, onBack: () -> Un
                 if (d.existing != null) vm.editNote(d.existing.id, text) else vm.addNote(d.page, d.x, d.y, text)
                 draft = null
             },
-            onDelete = { d.existing?.let { vm.erase(listOf(it.id)) }; draft = null },
+            onDelete = { d.existing?.let { vm.deleteAnnotations(listOf(it.id)) }; draft = null },
             onDismiss = { draft = null })
     }
+
+    if (showPages) AlertDialog(
+        onDismissRequest = { showPages = false },
+        title = { Text("Страница ${current + 1} из ${st.pageCount}") },
+        text = {
+            Column {
+                TextButton({ showPages = false; vm.rotatePage(current, true) }) { Text("Повернуть по часовой стрелке") }
+                TextButton({ showPages = false; vm.rotatePage(current, false) }) { Text("Повернуть против часовой") }
+                TextButton({ showPages = false; vm.insertBlank(current) }) { Text("Вставить пустую страницу после") }
+                TextButton({ showPages = false; insertLauncher.launch(arrayOf("application/pdf")) }) { Text("Вставить страницы из PDF…") }
+                TextButton({ showPages = false; confirmDelete = true }) { Text("Удалить эту страницу") }
+                TextButton({ showPages = false; confirmReset = true }) { Text("Вернуть исходный документ…") }
+                Text(
+                    "Исходный файл не меняется. Результат сохраняется через «Сохранить PDF с аннотациями».",
+                    style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp)
+                )
+            }
+        },
+        confirmButton = { TextButton({ showPages = false }) { Text("Закрыть") } })
+
+    if (confirmDelete) AlertDialog(
+        onDismissRequest = { confirmDelete = false }, title = { Text("Удалить страницу ${current + 1}?") },
+        text = { Text("Аннотации на этой странице тоже будут удалены.") },
+        confirmButton = { TextButton({ confirmDelete = false; vm.deletePage(current) }) { Text("Удалить") } },
+        dismissButton = { TextButton({ confirmDelete = false }) { Text("Отмена") } })
+
+    if (confirmReset) AlertDialog(
+        onDismissRequest = { confirmReset = false }, title = { Text("Вернуть исходный документ?") },
+        text = { Text("Правки страниц и все аннотации этого документа будут удалены.") },
+        confirmButton = { TextButton({ confirmReset = false; vm.resetEdits() }) { Text("Вернуть") } },
+        dismissButton = { TextButton({ confirmReset = false }) { Text("Отмена") } })
+
+    formProbe?.let { p ->
+        FormDialog(
+            p,
+            onSet = { v -> vm.formSet(p, v); formProbe = null },
+            onDismiss = { formProbe = null })
+    }
 }
 
+/**
+ * fit = true  — режим «по страницам»: страница целиком вписана во вьюпорт и центрирована.
+ * fit = false — режим «лента»: страница на всю ширину.
+ * При зуме поверх базового битмапа рисуется чёткий фрагмент только видимой части страницы (память ограничена размером экрана).
+ */
 @Composable
 private fun PageItem(
-    engine: SafeEngine, index: Int, layoutKey: String, renderPx: Int, draftPx: Int,
+    engine: SafeEngine, index: Int, layoutKey: String, epoch: Int, fit: Boolean,
+    vw: Float, vh: Float, tick: Int, sScale: Float, sTx: Float, sTy: Float,
     strokes: List<Stroke>, hits: List<FloatArray>, tool: Tool, color: Color, stylusOnly: Boolean,
-    onStroke: (FloatArray) -> Unit, onErase: (List<Long>) -> Unit,
-    onNoteAt: (Float, Float) -> Unit, onNoteOpen: (Stroke) -> Unit, onTapBackground: () -> Unit
+    onStroke: (FloatArray) -> Unit, onErase: (List<Long>, Map<Long, List<FloatArray>>) -> Unit,
+    onNoteAt: (Float, Float) -> Unit, onNoteOpen: (Stroke) -> Unit,
+    onTextSelect: (Float, Float, Float, Float) -> Unit, onFormTap: (Float, Float) -> Unit,
+    onTapBackground: () -> Unit
 ) {
-    val size by produceState<PageSize?>(null, index, layoutKey) { value = engine.pageSize(index) }
-    // двухступенчатый рендер: дешёвый RGB_565-черновик сразу, чистый кадр апдейтом;
-    // при смене renderPx старый битмап остаётся на экране, пока не придёт чёткий
-    val bmp by produceState<Bitmap?>(null, index, renderPx, layoutKey) {
-        value = engine.render(index, renderPx, if (renderPx > draftPx) draftPx else 0)
+    val density = LocalDensity.current
+    val size by produceState<PageSize?>(null, index, layoutKey, epoch) { value = engine.pageSize(index) }
+    val ratio = size?.let { it.h / it.w } ?: 1.41f
+    val basePx = if (fit) minOf(vw, vh / ratio) else vw
+    val px = minOf(basePx.roundToInt().coerceAtLeast(64), MAX_RENDER_PX)
+    val bmp by produceState<Bitmap?>(null, index, px, layoutKey, epoch) { value = engine.render(index, px) }
+
+    val holder = remember { arrayOfNulls<LayoutCoordinates>(1) }
+    var patch by remember { mutableStateOf<Patch?>(null) }
+    LaunchedEffect(tick, index, epoch, layoutKey) {
+        if (sScale <= 1.15f) { patch = null; return@LaunchedEffect }
+        val c = holder[0]
+        if (c == null || !c.isAttached) return@LaunchedEffect
+        val pos = c.positionInParent()
+        val pw = c.size.width.toFloat()
+        val ph = c.size.height.toFloat()
+        if (pw <= 0f || ph <= 0f) return@LaunchedEffect
+        val left = -sTx / sScale
+        val top = -sTy / sScale
+        val ix0 = maxOf(left, pos.x)
+        val iy0 = maxOf(top, pos.y)
+        val ix1 = minOf(left + vw / sScale, pos.x + pw)
+        val iy1 = minOf(top + vh / sScale, pos.y + ph)
+        if (ix1 - ix0 < 8f || iy1 - iy0 < 8f) { patch = null; return@LaunchedEffect }
+        val fullW = (pw * sScale).roundToInt().coerceAtLeast(1)
+        val f = fullW / pw
+        val bx0 = ((ix0 - pos.x) * f).toInt().coerceAtLeast(0)
+        val by0 = ((iy0 - pos.y) * f).toInt().coerceAtLeast(0)
+        val bx1 = ceil((ix1 - pos.x) * f).toInt()
+        val by1 = ceil((iy1 - pos.y) * f).toInt()
+        val bmpPatch = engine.patch(index, fullW, bx0, by0, bx1, by1)
+        patch = Patch(bmpPatch, bx0 / f, by0 / f, (bx1 - bx0) / f, (by1 - by0) / f)
     }
-    val ratio by remember { derivedStateOf { size?.let { it.h / it.w } ?: 1.41f } }
-    Box(Modifier.fillMaxWidth().aspectRatio(1f / ratio).background(Color.White)) {
-        bmp?.let { Image(it.asImageBitmap(), null, Modifier.fillMaxSize()) }
-        PageOverlay(
-            strokes, hits, tool, color, stylusOnly, onStroke, onErase, onNoteAt, onNoteOpen, onTapBackground,
-            Modifier.fillMaxSize()
-        )
+
+    val body: @Composable (Modifier) -> Unit = { m ->
+        Box(m.background(Color.White).onGloballyPositioned { holder[0] = it }) {
+            bmp?.let { Image(it.asImageBitmap(), null, Modifier.fillMaxSize()) }
+            patch?.let { p ->
+                Image(
+                    p.bmp.asImageBitmap(), null,
+                    Modifier.offset { IntOffset(p.x.roundToInt(), p.y.roundToInt()) }
+                        .size(with(density) { p.w.toDp() }, with(density) { p.h.toDp() }),
+                    contentScale = ContentScale.FillBounds
+                )
+            }
+            PageOverlay(
+                strokes, hits, tool, color, stylusOnly, onStroke, onErase, onNoteAt, onNoteOpen,
+                onTextSelect, onFormTap, onTapBackground, Modifier.fillMaxSize()
+            )
+        }
     }
+    if (fit) Box(Modifier.fillMaxSize(), Alignment.Center) { body(Modifier.aspectRatio(1f / ratio)) }
+    else body(Modifier.fillMaxWidth().aspectRatio(1f / ratio))
 }
 
 @Composable
-private fun Thumb(engine: SafeEngine, i: Int, layoutKey: String, selected: Boolean, hasAnn: Boolean, onClick: () -> Unit) {
-    val size by produceState<PageSize?>(null, i, layoutKey) { value = engine.pageSize(i) }
-    // миниатюры — только в черновом кэше (RGB_565, 160 px): дёшево и не вытесняет чистые кадры
-    val bmp by produceState<Bitmap?>(null, i, layoutKey) { value = engine.renderDraft(i, THUMB_PX) }
+private fun Thumb(engine: SafeEngine, i: Int, layoutKey: String, epoch: Int, selected: Boolean, hasAnn: Boolean, onClick: () -> Unit) {
+    val size by produceState<PageSize?>(null, i, layoutKey, epoch) { value = engine.pageSize(i) }
+    val bmp by produceState<Bitmap?>(null, i, layoutKey, epoch) { value = engine.thumb(i, 160) }
     val ratio = size?.let { it.h / it.w } ?: 1.41f
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Box(
@@ -360,8 +570,39 @@ private fun NoteDialog(initial: String, canDelete: Boolean, onSave: (String) -> 
 }
 
 @Composable
+private fun FormDialog(p: FormProbe, onSet: (String?) -> Unit, onDismiss: () -> Unit) {
+    val f = p.field
+    var text by remember { mutableStateOf(f.value) }
+    when {
+        f.readOnly -> AlertDialog(
+            onDismissRequest = onDismiss, title = { Text("Поле только для чтения") },
+            confirmButton = { TextButton(onDismiss) { Text("Закрыть") } })
+        f.kind == FormKind.TOGGLE -> AlertDialog(
+            onDismissRequest = onDismiss, title = { Text("Переключить флажок?") },
+            confirmButton = { TextButton({ onSet(null) }) { Text("Переключить") } },
+            dismissButton = { TextButton(onDismiss) { Text("Отмена") } })
+        f.kind == FormKind.TEXT -> AlertDialog(
+            onDismissRequest = onDismiss, title = { Text("Текстовое поле") },
+            text = { OutlinedTextField(text, { text = it }, modifier = Modifier.fillMaxWidth()) },
+            confirmButton = { TextButton({ onSet(text) }) { Text("Сохранить") } },
+            dismissButton = { TextButton(onDismiss) { Text("Отмена") } })
+        f.kind == FormKind.CHOICE -> AlertDialog(
+            onDismissRequest = onDismiss, title = { Text("Выберите значение") },
+            text = {
+                LazyColumn(Modifier.heightIn(max = 320.dp)) {
+                    items(f.options) { o -> Text(o, Modifier.fillMaxWidth().clickable { onSet(o) }.padding(vertical = 12.dp)) }
+                }
+            },
+            confirmButton = { TextButton(onDismiss) { Text("Закрыть") } })
+        else -> AlertDialog(
+            onDismissRequest = onDismiss, title = { Text("Этот тип поля не поддерживается") },
+            confirmButton = { TextButton(onDismiss) { Text("Закрыть") } })
+    }
+}
+
+@Composable
 private fun SearchDialog(
-    hits: Map<Int, List<FloatArray>>, onSearch: (String) -> Unit, onClear: () -> Unit,
+    hits: Map<Int, List<FloatArray>>, searching: Boolean, onSearch: (String) -> Unit, onClear: () -> Unit,
     onGo: (Int) -> Unit, onDismiss: () -> Unit
 ) {
     var q by remember { mutableStateOf("") }
@@ -374,6 +615,7 @@ private fun SearchDialog(
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                     keyboardActions = KeyboardActions(onSearch = { onSearch(q) })
                 )
+                if (searching) LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 8.dp))
                 LazyColumn(Modifier.heightIn(max = 300.dp)) {
                     items(hits.keys.sorted()) { p ->
                         Text("Стр. ${p + 1} · ${hits[p]!!.size}", Modifier.fillMaxWidth().clickable { onGo(p) }.padding(vertical = 10.dp))

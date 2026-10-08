@@ -8,6 +8,9 @@ plugins {
 // Проверьте актуальную версию: https://maven.ghostscript.com/com/artifex/mupdf/fitz/
 val mupdfVersion = "1.25.2"
 
+// Подпись релиза: если заданы переменные окружения (в CI из секретов), используется ваш keystore, иначе — debug-ключ.
+val keystorePath: String? = System.getenv("KEYSTORE_FILE")
+
 android {
     namespace = "app.folio"
     compileSdk = 35
@@ -15,17 +18,25 @@ android {
         applicationId = "app.folio"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
+    }
+    signingConfigs {
+        if (keystorePath != null && File(keystorePath).exists()) {
+            create("release") {
+                storeFile = File(keystorePath)
+                storePassword = System.getenv("KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("KEY_ALIAS")
+                keyPassword = System.getenv("KEY_PASSWORD")
+            }
+        }
     }
     buildTypes {
         release {
-            isMinifyEnabled = true
-            isShrinkResources = true
-            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            // Для настоящих релизов подставьте свой keystore (через секреты GitHub).
-            signingConfig = signingConfigs.getByName("debug")
+            // R8 выключен намеренно: надёжная сборка важнее размера (MuPDF/junrar тянут много рефлексии).
+            isMinifyEnabled = false
+            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
         }
     }
     compileOptions {
@@ -58,4 +69,6 @@ dependencies {
 
     implementation("com.artifex.mupdf:fitz:$mupdfVersion")   // AGPL-3.0
     implementation("com.github.junrar:junrar:7.5.5")          // CBR (unrar license, open source)
+
+    testImplementation("junit:junit:4.13.2")
 }
