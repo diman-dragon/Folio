@@ -30,14 +30,15 @@ Kotlin + Jetpack Compose. Разработка: VS Code + GitHub. Лицензи
 ```bash
 ./gradlew :app:assembleDebug
 ./gradlew :app:installDebug          # телефон по USB
-./gradlew :app:testDebugUnitTest     # юнит-тесты геометрии аннотаций
+./gradlew :app:testDebugUnitTest     # юнит-тесты
+./gradlew :app:bundleRelease         # AAB для Google Play
 ```
-Нужны JDK 17 и Android SDK (platform 35). Gradle wrapper уже в репозитории.
-CI (`.github/workflows/build.yml`) собирает APK на каждый push; тесты идут отдельным шагом и сборку не блокируют.
+Нужны JDK 17+ (в CI — 21) и Android SDK (platform 36, build-tools 35). Gradle wrapper (8.14.3) уже в репозитории.
+CI: `build.yml` собирает APK/AAB на каждый push, `release.yml` по тегу `v*` выпускает подписанные файлы.
 
-### Подпись релиза
-Добавьте секреты репозитория `KEYSTORE_BASE64` (keystore в base64), `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD`.
-Без них release-APK подписывается debug-ключом. R8 для release выключен намеренно (надёжность важнее размера).
+## Публикация
+Пошаговая инструкция — `docs/PUBLISHING.md` (ключ подписи, секреты, Play Console, F-Droid, лицензия).
+Политика конфиденциальности — `PRIVACY.md`. Тексты магазина — `fastlane/metadata/android`.
 
 ## Структура
 

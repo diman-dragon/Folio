@@ -1,5 +1,7 @@
 package app.folio.ui
 
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -17,6 +19,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import app.folio.BuildConfig
 import java.io.File
 
 private fun dirSize(f: File): Long = if (f.exists()) f.walkTopDown().filter { it.isFile }.sumOf { it.length() } else 0L
@@ -58,8 +61,9 @@ fun SettingsDialog(onDismiss: () -> Unit) {
     val prefs = remember { ctx.getSharedPreferences("folio", 0) }
     var paged by remember { mutableStateOf(prefs.getBoolean("paged", true)) }
     var cacheBytes by remember { mutableLongStateOf(dirSize(File(ctx.cacheDir, "docs"))) }
-    val version = remember {
-        runCatching { ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName }.getOrNull() ?: "—"
+    val version = BuildConfig.VERSION_NAME
+    fun open(url: String) {
+        runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
     }
 
     AlertDialog(
@@ -101,6 +105,13 @@ fun SettingsDialog(onDismiss: () -> Unit) {
                     "Лицензия AGPL-3.0-or-later. Движок документов — MuPDF (Artifex Software), AGPL-3.0.",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                Text(
+                    "Приложение работает полностью офлайн: не собирает данные и не отправляет их никуда.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+                TextButton(onClick = { open(BuildConfig.SOURCE_URL) }) { Text("Исходный код (AGPL)") }
+                TextButton(onClick = { open(BuildConfig.SOURCE_URL + "/blob/main/PRIVACY.md") }) { Text("Политика конфиденциальности") }
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("Готово") } }

@@ -1,5 +1,6 @@
+// База версий совпадает с Capacitor 8 (Android): AGP 8.13.0, Gradle 8.14.3, compileSdk/targetSdk 36.
 plugins {
-    id("com.android.application") version "8.7.3" apply false
+    id("com.android.application") version "8.13.0" apply false
     id("org.jetbrains.kotlin.android") version "2.0.21" apply false
     id("org.jetbrains.kotlin.plugin.compose") version "2.0.21" apply false
     id("com.google.devtools.ksp") version "2.0.21-1.0.28" apply false

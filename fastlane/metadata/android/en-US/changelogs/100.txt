@@ -1,0 +1,1 @@
+First public release: PDF, EPUB, FB2, CBZ and more; pen, word/sentence highlighting, notes, undo/redo; PDF page editing; library; light and dark themes.

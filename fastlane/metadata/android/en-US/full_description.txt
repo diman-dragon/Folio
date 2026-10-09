@@ -1,0 +1,32 @@
+Folio is an open-source document reader for Android: no ads, no tracking, no internet access.
+
+<b>Formats</b>
+PDF, EPUB, MOBI, FB2, CBZ/CBR comics, XPS, SVG, TXT, HTML, images, plus DOCX, XLSX and PPTX.
+
+<b>Comfortable reading</b>
+• page-by-page (swipe) or continuous scroll;
+• pinch-zoom exactly where you pinch; double-tap zoom;
+• table of contents, text search, page thumbnails (auto-hide, can be pinned);
+• light and dark themes, dynamic colors.
+
+<b>Draw and write on any document</b>
+• pressure-sensitive pen, marker, underline, eraser (including partial erase);
+• works on scans too — no text layer required;
+• sticky notes: long-press exactly where you want one;
+• undo and redo.
+
+<b>Text tools</b>
+• highlight, underline and copy by word, sentence or free range;
+• long-press a word to highlight it;
+• one list of all notes and highlights in the document.
+
+<b>PDF editing</b>
+• rotate, delete and insert pages, insert pages from another PDF;
+• fill in forms;
+• export a PDF with standard annotations that open in any viewer.
+
+<b>Library</b>
+Recent and full library, covers from the first page, filters, sorting, search, favorites, reading progress.
+
+<b>Open source</b>
+AGPL-3.0. Document engine: MuPDF. The app collects no data and has no internet permission.

@@ -1,4 +1,0 @@
--keep class com.artifex.mupdf.fitz.** { *; }
--dontwarn org.apache.commons.vfs2.**
--dontwarn org.slf4j.**
--dontwarn com.github.junrar.**
