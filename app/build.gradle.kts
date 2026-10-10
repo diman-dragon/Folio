@@ -12,8 +12,8 @@ val mupdfVersion = "1.25.2"
 val keystorePath: String? = System.getenv("KEYSTORE_FILE")
 
 // Версия: по умолчанию 1.0.0 / 100; в CI релиза переопределяется -PversionName / -PversionCode.
-val appVersionName: String = (project.findProperty("versionName") as String?) ?: "1.0.0"
-val appVersionCode: Int = (project.findProperty("versionCode") as String?)?.toIntOrNull() ?: 100
+val appVersionName: String = (project.findProperty("versionName") as String?) ?: "1.1.0"
+val appVersionCode: Int = (project.findProperty("versionCode") as String?)?.toIntOrNull() ?: 110
 
 // Ссылка на исходный код (требование AGPL): в GitHub Actions берётся из репозитория автоматически.
 val sourceUrl: String = (project.findProperty("sourceUrl") as String?)
