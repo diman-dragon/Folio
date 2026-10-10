@@ -43,13 +43,18 @@ fun LibraryScreen(vm: LibraryViewModel, onOpen: (BookEntity) -> Unit) {
     val scanning by vm.scanning.collectAsState()
     var searching by remember { mutableStateOf(false) }
     var sortMenu by remember { mutableStateOf(false) }
+    var showSettings by remember { mutableStateOf(false) }
+    if (showSettings) SettingsDialog { showSettings = false }
 
     val pickFolder = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { it?.let(vm::addRoot) }
     val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { u -> u?.let { vm.openUri(it, onOpen) } }
 
     Scaffold(
         topBar = {
-            if (tab == 0) TopAppBar(title = { Text("Недавние", fontWeight = FontWeight.SemiBold) })
+            if (tab == 0) TopAppBar(
+                title = { Text("Недавние", fontWeight = FontWeight.SemiBold) },
+                actions = { IconButton(onClick = { showSettings = true }) { Icon(Icons.Default.Settings, "Настройки") } }
+            )
             else TopAppBar(
                 title = {
                     if (searching) TextField(
@@ -59,6 +64,7 @@ fun LibraryScreen(vm: LibraryViewModel, onOpen: (BookEntity) -> Unit) {
                     ) else Text("Библиотека", fontWeight = FontWeight.SemiBold)
                 },
                 actions = {
+                    IconButton(onClick = { showSettings = true }) { Icon(Icons.Default.Settings, "Настройки") }
                     IconButton(onClick = { searching = !searching; if (!searching) vm.query.value = "" }) {
                         Icon(if (searching) Icons.Default.Close else Icons.Default.Search, "Поиск")
                     }

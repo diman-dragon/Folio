@@ -7,7 +7,11 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkHorizontally
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
@@ -27,7 +31,9 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.Undo
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Search
@@ -45,6 +51,7 @@ import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -58,6 +65,7 @@ import app.folio.data.BookEntity
 import app.folio.engine.FormKind
 import app.folio.engine.PageSize
 import app.folio.engine.SafeEngine
+import app.folio.engine.TextSelect
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
@@ -99,17 +107,23 @@ private fun ReaderContent(vm: ReaderViewModel, st: ReaderState, onBack: () -> Un
     var paged by remember { mutableStateOf(prefs.getBoolean("paged", true)) }   // по страницам / лента
     var tool by remember { mutableStateOf(Tool.NONE) }
     var color by remember { mutableIntStateOf(Palette[0]) }
-    var stylusOnly by remember { mutableStateOf(Settings.stylusOnly) } // значение из настроек приложения
-    var chrome by remember { mutableStateOf(true) }
-    var showThumbs by remember { mutableStateOf(false) }   // миниатюры скрыты по умолчанию
+    var stylusOnly by remember { mutableStateOf(Settings.stylusOnly) }
+    var pinned by remember { mutableStateOf(prefs.getBoolean("tools_pinned", false)) }        // панель пера закреплена
+    var toolsOpen by remember { mutableStateOf(prefs.getBoolean("tools_pinned", false)) }     // по умолчанию спрятана
+    var thumbsPinned by remember { mutableStateOf(prefs.getBoolean("thumbs_pinned", false)) } // миниатюры закреплены
+    var showThumbs by remember { mutableStateOf(prefs.getBoolean("thumbs_pinned", false)) }
+    var selMode by remember { mutableIntStateOf(TextSelect.WORD) }                            // слово / предложение / свободно
     var showToc by remember { mutableStateOf(false) }
     var showSearch by remember { mutableStateOf(false) }
     var showPages by remember { mutableStateOf(false) }
+    var showNotes by remember { mutableStateOf(false) }
+    var showSettings by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
     var confirmReset by remember { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
     var draft by remember { mutableStateOf<NoteDraft?>(null) }
     var formProbe by remember { mutableStateOf<FormProbe?>(null) }
+    var headerPx by remember { mutableIntStateOf(0) }
 
     // трансформация вьюпорта: экран = содержимое * scale + (tx, ty); точка отсчёта — левый верхний угол
     var scale by remember { mutableFloatStateOf(1f) }
@@ -128,10 +142,22 @@ private fun ReaderContent(vm: ReaderViewModel, st: ReaderState, onBack: () -> Un
     val anns by vm.annotations.collectAsState()
     val hits by vm.hits.collectAsState()
     val searching by vm.searching.collectAsState()
+    val canUndo by vm.canUndo.collectAsState()
+    val canRedo by vm.canRedo.collectAsState()
     val byPage = remember(anns, st.layoutKey) {
         anns.filter { it.layoutKey == st.layoutKey }.map { it.toStroke() }.groupBy { it.page }
     }
+    val notes = remember(byPage) {
+        byPage.values.flatten().filter { it.type == "NOTE" || it.type == "TEXT_HL" || it.type == "TEXT_UL" }.sortedBy { it.page }
+    }
+    val annotatedPages = remember(byPage) { byPage.filterValues { it.isNotEmpty() }.keys }
     val current by remember { derivedStateOf { if (paged) pagerState.currentPage else listState.firstVisibleItemIndex } }
+
+    /** Клик «мимо»: всё незакреплённое (панель пера, миниатюры) убирается. */
+    fun dismissUnpinned() {
+        if (!pinned) toolsOpen = false
+        if (!thumbsPinned) showThumbs = false
+    }
 
     fun resetZoom() { scale = 1f; tx = 0f; ty = 0f }
     fun goTo(i: Int) { resetZoom(); scope.launch { if (paged) pagerState.scrollToPage(i) else listState.scrollToItem(i) } }
@@ -195,129 +221,34 @@ private fun ReaderContent(vm: ReaderViewModel, st: ReaderState, onBack: () -> Un
     }
 
     BoxWithConstraints(Modifier.fillMaxSize().background(Color(0xFF1E1F22))) {
-        val viewW = maxWidth
-        val viewH = maxHeight
-        val vwPx = with(density) { viewW.toPx() }
-        val vhPx = with(density) { viewH.toPx() }
-        if (st.isReflowable) LaunchedEffect(viewW, viewH) { vm.relayout(viewW.value, viewH.value) }
-
-        val pageUi: @Composable (Int, Boolean) -> Unit = { i, fit ->
-            PageItem(
-                engine, i, st.layoutKey, st.epoch, fit, vwPx, vhPx, tick, sScale, sTx, sTy,
-                byPage[i].orEmpty(), hits[i].orEmpty(), tool, Color(color), stylusOnly,
-                onStroke = { vm.addStroke(i, tool, color, it) },
-                onErase = { d, r -> vm.erase(d, r) },
-                onNoteAt = { x, y -> draft = NoteDraft(i, x, y, null) },
-                onNoteOpen = { draft = NoteDraft(i, it.pts[0], it.pts[1], it) },
-                onTextSelect = { ax, ay, bx, by -> vm.addTextMarkup(i, tool, color, ax, ay, bx, by) },
-                onFormTap = { x, y ->
-                    vm.formProbe(i, x, y) { p ->
-                        if (p == null) {
-                            Toast.makeText(ctx, "Здесь нет поля формы", Toast.LENGTH_SHORT).show()
-                        } else {
-                            formProbe = p
-                        }
-                    }
-                },
-                onTapBackground = { chrome = !chrome }
-            )
+        val screenW = maxWidth
+        val screenH = maxHeight
+        val navPx = WindowInsets.navigationBars.getBottom(density)
+        // вёрстка EPUB/FB2 считается по ПОСТОЯННОЙ области (экран минус шапка минус навигация):
+        // панели пера и миниатюры не должны вызывать перевёрстку и скрывать аннотации
+        if (st.isReflowable && headerPx > 0) {
+            val reflowH = (screenH - with(density) { headerPx.toDp() } - with(density) { navPx.toDp() }).value
+            LaunchedEffect(screenW, reflowH) { vm.relayout(screenW.value, reflowH) }
         }
 
         Box(Modifier.fillMaxSize()) {
-            // ---------- страницы + жесты зума ----------
-            Box(
-                Modifier.fillMaxSize()
-                    .pointerInput(tool, stylusOnly, paged) {
-                        var lastTapTime = 0L
-                        var lastTapPos = Offset.Zero
-                        val slop = viewConfiguration.touchSlop
-                        awaitEachGesture {
-                            val first = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
-                            val w = size.width.toFloat()
-                            val h = size.height.toFloat()
-                            var moved = false
-                            var multi = false
-                            var lastUp = first.uptimeMillis
-                            do {
-                                val ev = awaitPointerEvent(PointerEventPass.Initial)
-                                lastUp = ev.changes[0].uptimeMillis
-                                val pressed = ev.changes.filter { it.pressed }
-                                if (pressed.size >= 2) {
-                                    multi = true
-                                    val z = ev.calculateZoom()
-                                    val c = ev.calculateCentroid()
-                                    val p = ev.calculatePan()
-                                    if (z != 1f || p != Offset.Zero) {
-                                        zoomAt(z, c, w, h)
-                                        panBy(p, w, h)
-                                        ev.changes.forEach { it.consume() }
-                                    }
-                                } else if (!multi && scale > 1f && pressed.size == 1) {
-                                    val ch = pressed[0]
-                                    val canPan = tool == Tool.NONE || (stylusOnly && ch.type != PointerType.Stylus)
-                                    val d = ch.positionChange()
-                                    if (canPan && d != Offset.Zero) { panBy(d, w, h); ch.consume(); moved = true }
-                                }
-                                if (!moved && (ev.changes[0].position - first.position).getDistance() > slop) moved = true
-                            } while (ev.changes.any { it.pressed })
-
-                            // двойной тап: зум в точку / сброс
-                            if (tool == Tool.NONE && !multi && !moved && lastUp - first.uptimeMillis < 300) {
-                                if (first.uptimeMillis - lastTapTime < 350 && (first.position - lastTapPos).getDistance() < 120f) {
-                                    lastTapTime = 0L
-                                    if (scale > 1f) resetZoom() else zoomAt(2.5f, first.position, w, h)
-                                } else { lastTapTime = lastUp; lastTapPos = first.position }
-                            }
-                            // стилус замечен -> дальше палец не рисует (защита от ладони); срабатывает после жеста, чтобы не прервать штрих
-                            if (first.type == PointerType.Stylus && tool != Tool.NONE && !stylusOnly) stylusOnly = true
-                        }
-                    }
-                    .pointerInput(Unit) { detectTapGestures { chrome = !chrome } }
-            ) {
-                Box(
-                    Modifier.fillMaxSize().graphicsLayer {
-                        transformOrigin = TransformOrigin(0f, 0f)
-                        scaleX = scale; scaleY = scale
-                        translationX = tx; translationY = ty
-                    }
-                ) {
-                    if (paged) {
-                        HorizontalPager(
-                            state = pagerState, modifier = Modifier.fillMaxSize(),
-                            userScrollEnabled = scale <= 1.01f,
-                            beyondViewportPageCount = 1,
-                            key = { "${st.layoutKey}:${st.epoch}:$it" }
-                        ) { i -> pageUi(i, true) }
-                    } else {
-                        LazyColumn(
-                            state = listState, modifier = Modifier.fillMaxSize(),
-                            verticalArrangement = Arrangement.spacedBy(6.dp),
-                            contentPadding = PaddingValues(vertical = 6.dp)
-                        ) {
-                            items(st.pageCount, key = { "${st.layoutKey}:${st.epoch}:$it" }) { i -> pageUi(i, false) }
-                        }
-                    }
-                }
-            }
-
-            // ---------- номер страницы ----------
-            if (st.pageCount > 0) Surface(
-                Modifier.align(Alignment.BottomEnd).padding(end = 12.dp, bottom = if (chrome) 84.dp else 16.dp),
-                shape = RoundedCornerShape(50), color = Color.Black.copy(alpha = 0.6f)
-            ) { Text("${current + 1} / ${st.pageCount}", Modifier.padding(10.dp, 4.dp), color = Color.White) }
-
-            // ---------- верхняя панель ----------
-            AnimatedVisibility(chrome, Modifier.align(Alignment.TopCenter), enter = slideInVertically { -it } + fadeIn(), exit = slideOutVertically { -it } + fadeOut()) {
-                TopAppBar(
-                    title = { Text(st.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                    navigationIcon = { IconButton(onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Назад") } },
-                    actions = {
-                        IconButton({ showThumbs = !showThumbs }) { Icon(Icons.Default.GridView, "Миниатюры") }
-                        if (st.toc.isNotEmpty()) IconButton({ showToc = true }) { Icon(Icons.AutoMirrored.Filled.List, "Оглавление") }
-                        IconButton({ showSearch = true }) { Icon(Icons.Default.Search, "Поиск") }
+            Column(Modifier.fillMaxSize()) {
+                // ---------- шапка: видна всегда ----------
+                ReaderHeader(
+                    title = st.name, onBack = onBack,
+                    canUndo = canUndo, canRedo = canRedo, onUndo = { vm.undo() }, onRedo = { vm.redo() },
+                    toolsActive = toolsOpen || tool != Tool.NONE, onTools = { toolsOpen = !toolsOpen },
+                    onThumbs = { showThumbs = !showThumbs },
+                    onSearch = { showSearch = true },
+                    modifier = Modifier.onSizeChanged { headerPx = it.height },
+                    menu = {
                         Box {
-                            IconButton({ menu = true }) { Icon(Icons.Default.MoreVert, "Ещё") }
+                            IconButton({ menu = true }, Modifier.size(40.dp)) { Icon(Icons.Default.MoreVert, "Ещё") }
                             DropdownMenu(menu, { menu = false }) {
+                                DropdownMenuItem(text = { Text("Заметки и выделения (${notes.size})") }, onClick = { menu = false; showNotes = true })
+                                if (st.toc.isNotEmpty()) {
+                                    DropdownMenuItem(text = { Text("Оглавление") }, onClick = { menu = false; showToc = true })
+                                }
                                 DropdownMenuItem(
                                     text = { Text(if (paged) "Режим: лента" else "Режим: по страницам") },
                                     onClick = {
@@ -338,45 +269,148 @@ private fun ReaderContent(vm: ReaderViewModel, st: ReaderState, onBack: () -> Un
                                     DropdownMenuItem(text = { Text("Шрифт мельче") }, onClick = { vm.bumpFont(-2f) })
                                 }
                                 DropdownMenuItem(text = { Text("Сбросить зум") }, onClick = { resetZoom(); menu = false })
+                                DropdownMenuItem(text = { Text("Настройки") }, onClick = { menu = false; showSettings = true })
                             }
                         }
                     }
                 )
-            }
 
-            // ---------- панель аннотаций ----------
-            AnimatedVisibility(chrome, Modifier.align(Alignment.BottomCenter), enter = slideInVertically { it } + fadeIn(), exit = slideOutVertically { it } + fadeOut()) {
-                Surface(tonalElevation = 3.dp) {
-                    Row(
-                        Modifier.navigationBarsPadding().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp, vertical = 6.dp),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Tool.entries.forEach { t -> FilterChip(tool == t, { tool = t }, { Text(t.label) }) }
-                        Spacer(Modifier.width(4.dp))
-                        Palette.forEach { c ->
-                            Box(
-                                Modifier.size(28.dp).clip(CircleShape).background(Color(c))
-                                    .border(if (c == color) 3.dp else 1.dp, if (c == color) MaterialTheme.colorScheme.primary else Color.Gray, CircleShape)
-                                    .clickable { color = c }
+                // ---------- панель пера: выезжает под шапкой и СДВИГАЕТ текст вниз ----------
+                AnimatedVisibility(toolsOpen, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
+                    ToolsPanel(
+                        tool = tool, onTool = { tool = it },
+                        color = color, onColor = { color = it },
+                        selMode = selMode, onSelMode = { selMode = it },
+                        stylusOnly = stylusOnly, onStylusOnly = { stylusOnly = !stylusOnly },
+                        pinned = pinned,
+                        onPin = { pinned = !pinned; prefs.edit().putBoolean("tools_pinned", pinned).apply() }
+                    )
+                }
+
+                Row(Modifier.weight(1f).fillMaxWidth().navigationBarsPadding()) {
+                    // ---------- миниатюры: тоже сдвигают текст, а не перекрывают ----------
+                    AnimatedVisibility(showThumbs, enter = expandHorizontally(), exit = shrinkHorizontally()) {
+                        ThumbsPanel(
+                            engine, st.pageCount, st.layoutKey, st.epoch, current, annotatedPages, thumbsPinned,
+                            onPin = { thumbsPinned = !thumbsPinned; prefs.edit().putBoolean("thumbs_pinned", thumbsPinned).apply() },
+                            onPick = { goTo(it) }
+                        )
+                    }
+
+                    BoxWithConstraints(Modifier.weight(1f).fillMaxHeight()) {
+                        val vwPx = with(density) { maxWidth.toPx() }
+                        val vhPx = with(density) { maxHeight.toPx() }
+                        val viewW = maxWidth
+
+                        val pageUi: @Composable (Int, Boolean) -> Unit = { i, fit ->
+                            PageItem(
+                                engine, i, st.layoutKey, st.epoch, fit, vwPx, vhPx, tick, sScale, sTx, sTy,
+                                byPage[i].orEmpty(), hits[i].orEmpty(), tool, Color(color), stylusOnly,
+                                onStroke = { dismissUnpinned(); vm.addStroke(i, tool, color, it) },
+                                onErase = { d, r -> dismissUnpinned(); vm.erase(d, r) },
+                                onNoteAt = { x, y -> dismissUnpinned(); draft = NoteDraft(i, x, y, null) },
+                                onNoteOpen = { draft = NoteDraft(i, it.pts[0], it.pts[1], it) },
+                                onTextSelect = { ax, ay, bx, by -> dismissUnpinned(); vm.addTextMarkup(i, tool, color, ax, ay, bx, by, selMode) },
+                                onFormTap = { x, y ->
+                                    dismissUnpinned()
+                                    vm.formProbe(i, x, y) { p ->
+                                        if (p == null) {
+                                            Toast.makeText(ctx, "Здесь нет поля формы", Toast.LENGTH_SHORT).show()
+                                        } else {
+                                            formProbe = p
+                                        }
+                                    }
+                                },
+                                onLongPressText = { x, y ->
+                                    dismissUnpinned()
+                                    vm.longPressText(i, x, y, color, selMode) { draft = NoteDraft(i, x, y, null) }
+                                },
+                                onTapBackground = { dismissUnpinned() }
                             )
                         }
-                        IconButton({ vm.undo() }) { Icon(Icons.AutoMirrored.Filled.Undo, "Отменить") }
-                        FilterChip(stylusOnly, { stylusOnly = !stylusOnly }, { Text("Только стилус") })
-                    }
-                }
-            }
 
-            // ---------- миниатюры (скрываются) ----------
-            AnimatedVisibility(showThumbs, Modifier.align(Alignment.CenterStart), enter = slideInHorizontally { -it }, exit = slideOutHorizontally { -it }) {
-                Surface(Modifier.width(108.dp).fillMaxHeight(), tonalElevation = 6.dp) {
-                    val ts = rememberLazyListState()
-                    LaunchedEffect(Unit) { ts.scrollToItem(current) }
-                    LazyColumn(
-                        state = ts, contentPadding = PaddingValues(8.dp, 72.dp, 8.dp, 88.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp), horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        items(st.pageCount, key = { "${st.layoutKey}:${st.epoch}:t$it" }) { i ->
-                            Thumb(engine, i, st.layoutKey, st.epoch, i == current, byPage[i]?.isNotEmpty() == true) { goTo(i) }
+                        Box(Modifier.fillMaxSize()) {
+                            // ---------- страницы + жесты зума ----------
+                            Box(
+                                Modifier.fillMaxSize()
+                                    .pointerInput(tool, stylusOnly, paged) {
+                                        var lastTapTime = 0L
+                                        var lastTapPos = Offset.Zero
+                                        val slop = viewConfiguration.touchSlop
+                                        awaitEachGesture {
+                                            val first = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                                            val w = size.width.toFloat()
+                                            val h = size.height.toFloat()
+                                            var moved = false
+                                            var multi = false
+                                            var lastUp = first.uptimeMillis
+                                            do {
+                                                val ev = awaitPointerEvent(PointerEventPass.Initial)
+                                                lastUp = ev.changes[0].uptimeMillis
+                                                val pressed = ev.changes.filter { it.pressed }
+                                                if (pressed.size >= 2) {
+                                                    multi = true
+                                                    val z = ev.calculateZoom()
+                                                    val c = ev.calculateCentroid()
+                                                    val p = ev.calculatePan()
+                                                    if (z != 1f || p != Offset.Zero) {
+                                                        zoomAt(z, c, w, h)
+                                                        panBy(p, w, h)
+                                                        ev.changes.forEach { it.consume() }
+                                                    }
+                                                } else if (!multi && scale > 1f && pressed.size == 1) {
+                                                    val ch = pressed[0]
+                                                    val canPan = tool == Tool.NONE || (stylusOnly && ch.type != PointerType.Stylus)
+                                                    val d = ch.positionChange()
+                                                    if (canPan && d != Offset.Zero) { panBy(d, w, h); ch.consume(); moved = true }
+                                                }
+                                                if (!moved && (ev.changes[0].position - first.position).getDistance() > slop) moved = true
+                                            } while (ev.changes.any { it.pressed })
+
+                                            // двойной тап: зум в точку / сброс
+                                            if (tool == Tool.NONE && !multi && !moved && lastUp - first.uptimeMillis < 300) {
+                                                if (first.uptimeMillis - lastTapTime < 350 && (first.position - lastTapPos).getDistance() < 120f) {
+                                                    lastTapTime = 0L
+                                                    if (scale > 1f) resetZoom() else zoomAt(2.5f, first.position, w, h)
+                                                } else { lastTapTime = lastUp; lastTapPos = first.position }
+                                            }
+                                            // стилус замечен -> дальше палец не рисует (защита от ладони); после жеста, чтобы не прервать штрих
+                                            if (first.type == PointerType.Stylus && tool != Tool.NONE && !stylusOnly) stylusOnly = true
+                                        }
+                                    }
+                                    .pointerInput(Unit) { detectTapGestures { dismissUnpinned() } }
+                            ) {
+                                Box(
+                                    Modifier.fillMaxSize().graphicsLayer {
+                                        transformOrigin = TransformOrigin(0f, 0f)
+                                        scaleX = scale; scaleY = scale
+                                        translationX = tx; translationY = ty
+                                    }
+                                ) {
+                                    if (paged) {
+                                        HorizontalPager(
+                                            state = pagerState, modifier = Modifier.fillMaxSize(),
+                                            userScrollEnabled = scale <= 1.01f,
+                                            beyondViewportPageCount = 1,
+                                            key = { "${st.layoutKey}:${st.epoch}:$it" }
+                                        ) { i -> pageUi(i, true) }
+                                    } else {
+                                        LazyColumn(
+                                            state = listState, modifier = Modifier.fillMaxSize(),
+                                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                                            contentPadding = PaddingValues(vertical = 6.dp)
+                                        ) {
+                                            items(st.pageCount, key = { "${st.layoutKey}:${st.epoch}:$it" }) { i -> pageUi(i, false) }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // ---------- номер страницы ----------
+                            if (st.pageCount > 0) Surface(
+                                Modifier.align(Alignment.BottomEnd).padding(end = 12.dp, bottom = 12.dp),
+                                shape = RoundedCornerShape(50), color = Color.Black.copy(alpha = 0.6f)
+                            ) { Text("${current + 1} / ${st.pageCount}", Modifier.padding(10.dp, 4.dp), color = Color.White) }
                         }
                     }
                 }
@@ -422,6 +456,15 @@ private fun ReaderContent(vm: ReaderViewModel, st: ReaderState, onBack: () -> Un
             onDismiss = { draft = null })
     }
 
+    if (showSettings) SettingsDialog { showSettings = false }
+
+    if (showNotes) NotesDialog(
+        list = notes,
+        onGo = { p -> showNotes = false; goTo(p) },
+        onEdit = { n -> showNotes = false; goTo(n.page); draft = NoteDraft(n.page, n.pts[0], n.pts[1], n) },
+        onDelete = { n -> vm.deleteAnnotations(listOf(n.id)) },
+        onDismiss = { showNotes = false })
+
     if (showPages) AlertDialog(
         onDismissRequest = { showPages = false },
         title = { Text("Страница ${current + 1} из ${st.pageCount}") },
@@ -461,6 +504,65 @@ private fun ReaderContent(vm: ReaderViewModel, st: ReaderState, onBack: () -> Un
     }
 }
 
+@Composable
+private fun ReaderHeader(
+    title: String, onBack: () -> Unit,
+    canUndo: Boolean, canRedo: Boolean, onUndo: () -> Unit, onRedo: () -> Unit,
+    toolsActive: Boolean, onTools: () -> Unit,
+    onThumbs: () -> Unit, onSearch: () -> Unit,
+    menu: @Composable () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(modifier.fillMaxWidth(), tonalElevation = 3.dp, shadowElevation = 2.dp) {
+        Row(
+            Modifier.statusBarsPadding().height(48.dp).padding(horizontal = 2.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onBack, Modifier.size(40.dp)) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Назад") }
+            Text(
+                title, Modifier.weight(1f).padding(horizontal = 4.dp),
+                maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium
+            )
+            IconButton(onUndo, Modifier.size(40.dp), enabled = canUndo) { Icon(Icons.AutoMirrored.Filled.Undo, "Отменить") }
+            IconButton(onRedo, Modifier.size(40.dp), enabled = canRedo) { Icon(Icons.AutoMirrored.Filled.Redo, "Вернуть") }
+            IconButton(onTools, Modifier.size(40.dp)) {
+                Icon(
+                    Icons.Default.Edit, "Инструменты рисования",
+                    tint = if (toolsActive) MaterialTheme.colorScheme.primary else LocalContentColor.current
+                )
+            }
+            IconButton(onThumbs, Modifier.size(40.dp)) { Icon(Icons.Default.GridView, "Миниатюры") }
+            IconButton(onSearch, Modifier.size(40.dp)) { Icon(Icons.Default.Search, "Поиск") }
+            menu()
+        }
+    }
+}
+
+@Composable
+private fun ThumbsPanel(
+    engine: SafeEngine, pageCount: Int, layoutKey: String, epoch: Int, current: Int, annotated: Set<Int>,
+    pinned: Boolean, onPin: () -> Unit, onPick: (Int) -> Unit
+) {
+    Surface(Modifier.width(112.dp).fillMaxHeight(), tonalElevation = 6.dp) {
+        Column {
+            TextButton(onPin, Modifier.fillMaxWidth()) {
+                Text(if (pinned) "Закреплено" else "Закрепить", style = MaterialTheme.typography.labelMedium)
+            }
+            val ts = rememberLazyListState()
+            LaunchedEffect(Unit) { ts.scrollToItem(current) }
+            LazyColumn(
+                state = ts, modifier = Modifier.weight(1f).fillMaxWidth(),
+                contentPadding = PaddingValues(8.dp), verticalArrangement = Arrangement.spacedBy(10.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                items(pageCount, key = { "$layoutKey:$epoch:t$it" }) { i ->
+                    Thumb(engine, i, layoutKey, epoch, i == current, i in annotated) { onPick(i) }
+                }
+            }
+        }
+    }
+}
+
 /**
  * fit = true  — режим «по страницам»: страница целиком вписана во вьюпорт и центрирована.
  * fit = false — режим «лента»: страница на всю ширину.
@@ -474,7 +576,7 @@ private fun PageItem(
     onStroke: (FloatArray) -> Unit, onErase: (List<Long>, Map<Long, List<FloatArray>>) -> Unit,
     onNoteAt: (Float, Float) -> Unit, onNoteOpen: (Stroke) -> Unit,
     onTextSelect: (Float, Float, Float, Float) -> Unit, onFormTap: (Float, Float) -> Unit,
-    onTapBackground: () -> Unit
+    onLongPressText: (Float, Float) -> Unit, onTapBackground: () -> Unit
 ) {
     val density = LocalDensity.current
     val size by produceState<PageSize?>(null, index, layoutKey, epoch) { value = engine.pageSize(index) }
@@ -523,7 +625,7 @@ private fun PageItem(
             }
             PageOverlay(
                 strokes, hits, tool, color, stylusOnly, onStroke, onErase, onNoteAt, onNoteOpen,
-                onTextSelect, onFormTap, onTapBackground, Modifier.fillMaxSize()
+                onTextSelect, onFormTap, onLongPressText, onTapBackground, Modifier.fillMaxSize()
             )
         }
     }
@@ -625,4 +727,77 @@ private fun SearchDialog(
         },
         confirmButton = { TextButton({ onSearch(q) }) { Text("Найти") } },
         dismissButton = { TextButton({ onClear(); onDismiss() }) { Text("Сбросить") } })
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ToolsPanel(
+    tool: Tool, onTool: (Tool) -> Unit, color: Int, onColor: (Int) -> Unit,
+    selMode: Int, onSelMode: (Int) -> Unit, stylusOnly: Boolean, onStylusOnly: () -> Unit,
+    pinned: Boolean, onPin: () -> Unit, modifier: Modifier = Modifier
+) {
+    Surface(modifier.fillMaxWidth(), tonalElevation = 3.dp, shadowElevation = 4.dp) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Tool.entries.forEach { t -> FilterChip(tool == t, { onTool(t) }, { Text(t.label) }) }
+            }
+            if (tool.isTextTool) {
+                Text("Что выделять:", style = MaterialTheme.typography.labelMedium)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    FilterChip(selMode == TextSelect.WORD, { onSelMode(TextSelect.WORD) }, { Text("Слово") })
+                    FilterChip(selMode == TextSelect.SENTENCE, { onSelMode(TextSelect.SENTENCE) }, { Text("Предложение") })
+                    FilterChip(selMode == TextSelect.FREE, { onSelMode(TextSelect.FREE) }, { Text("Свободно (от точки до точки)") })
+                }
+                Text(
+                    "Коснитесь текста — выделится слово или предложение; проведите вдоль текста — выделится весь фрагмент.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Palette.forEach { c ->
+                    Box(
+                        Modifier.size(28.dp).clip(CircleShape).background(Color(c))
+                            .border(if (c == color) 3.dp else 1.dp, if (c == color) MaterialTheme.colorScheme.primary else Color.Gray, CircleShape)
+                            .clickable { onColor(c) }
+                    )
+                }
+            }
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                FilterChip(stylusOnly, { onStylusOnly() }, { Text("Только стилус") })
+                FilterChip(pinned, { onPin() }, { Text("Закрепить панель") })
+            }
+        }
+    }
+}
+
+@Composable
+private fun NotesDialog(
+    list: List<Stroke>, onGo: (Int) -> Unit, onEdit: (Stroke) -> Unit, onDelete: (Stroke) -> Unit, onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Заметки и выделения") },
+        text = {
+            if (list.isEmpty()) Text("Пока ничего нет. Выберите инструмент «Заметка» и коснитесь страницы.")
+            else LazyColumn(Modifier.heightIn(max = 460.dp)) {
+                items(list, key = { it.id }) { n ->
+                    Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+                        val kind = when (n.type) { "NOTE" -> "Заметка"; "TEXT_HL" -> "Выделение"; else -> "Подчёркивание" }
+                        Text("Страница ${n.page + 1} · $kind", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                        Text(
+                            n.text?.takeIf { it.isNotBlank() } ?: "(без текста)",
+                            maxLines = 4, overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(top = 2.dp)
+                        )
+                        Row {
+                            TextButton({ onGo(n.page) }) { Text("Перейти") }
+                            if (n.type == "NOTE") TextButton({ onEdit(n) }) { Text("Изменить") }
+                            TextButton({ onDelete(n) }) { Text("Удалить") }
+                        }
+                    }
+                    HorizontalDivider()
+                }
+            }
+        },
+        confirmButton = { TextButton(onDismiss) { Text("Закрыть") } })
 }

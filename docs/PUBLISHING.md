@@ -24,11 +24,11 @@ base64 -w0 folio-release.jks      # на macOS: base64 -i folio-release.jks
 
 ## 2. Выпуск версии
 ```bash
-git tag v1.0.0
-git push origin v1.0.0
+git tag v1.1.0
+git push origin v1.1.0
 ```
-Workflow `release` соберёт подписанные `folio-v1.0.0.apk` и `.aab`, проверит 16 КБ и создаст GitHub Release с файлами и `SHA256SUMS.txt`.
-`versionCode` = 100 + номер запуска, `versionName` берётся из тега.
+Workflow `release` соберёт подписанные `folio-v1.1.0.apk` и `.aab`, проверит 16 КБ и создаст GitHub Release с файлами и `SHA256SUMS.txt`.
+`versionCode` = 110 + номер запуска, `versionName` берётся из тега.
 
 ## 3. Google Play Console
 1. Создайте приложение (язык по умолчанию — русский), загрузите `.aab` в Internal testing, затем в Production.

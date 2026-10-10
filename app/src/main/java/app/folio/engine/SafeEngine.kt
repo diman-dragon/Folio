@@ -79,8 +79,8 @@ class SafeEngine(val raw: DocumentEngine) {
 
     suspend fun toc() = mutex.withLock { withContext(Dispatchers.Default) { raw.toc() } }
     suspend fun unlock(pw: String) = mutex.withLock { withContext(Dispatchers.Default) { raw.unlock(pw) } }
-    suspend fun textQuads(i: Int, ax: Float, ay: Float, bx: Float, by: Float) =
-        mutex.withLock { withContext(Dispatchers.Default) { raw.textQuads(i, ax, ay, bx, by) } }
+    suspend fun selectText(i: Int, ax: Float, ay: Float, bx: Float, by: Float, mode: Int) =
+        mutex.withLock { withContext(Dispatchers.Default) { raw.selectText(i, ax, ay, bx, by, mode) } }
 
     /** Постраничный поиск: между страницами лок отпускается, корутина отменяема. */
     suspend fun search(q: String, onHit: (Hit) -> Unit) {

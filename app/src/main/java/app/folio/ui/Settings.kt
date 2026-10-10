@@ -1,54 +1,33 @@
 package app.folio.ui
 
 import android.content.Context
+import android.content.SharedPreferences
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 
-/**
- * Глобальные настройки приложения (SharedPreferences "folio").
- * Значения кэшируются в observable-свойствах, чтобы Compose перерисовывал UI при изменении.
- */
+/** Настройки приложения. Значения наблюдаемы из Compose и сохраняются в SharedPreferences "folio". */
 object Settings {
-    private const val PREFS = "folio"
-    private const val KEY_THEME = "theme"
-    private const val KEY_DYNAMIC = "dynamic_colors"
-    private const val KEY_STYLUS_ONLY = "stylus_only"
+    var theme by mutableStateOf("system")        // system | light | dark
+    var dynamicColors by mutableStateOf(true)    // Material You (Android 12+)
+    var stylusOnly by mutableStateOf(false)      // «только стилус» при открытии книги
 
-    /** "system" | "light" | "dark" */
-    var theme: String by mutableStateOf("system")
-        private set
+    private fun prefs(ctx: Context): SharedPreferences = ctx.getSharedPreferences("folio", 0)
 
-    /** Динамические цвета Material You (Android 12+). */
-    var dynamicColors: Boolean by mutableStateOf(true)
-        private set
-
-    /** Рисовать только стилусом (значение по умолчанию для новой книги). */
-    var stylusOnly: Boolean by mutableStateOf(false)
-        private set
-
-    fun init(ctx: Context) {
-        val p = ctx.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        theme = p.getString(KEY_THEME, "system") ?: "system"
-        dynamicColors = p.getBoolean(KEY_DYNAMIC, true)
-        stylusOnly = p.getBoolean(KEY_STYLUS_ONLY, false)
+    fun load(ctx: Context) {
+        val p = prefs(ctx)
+        theme = p.getString("theme", "system") ?: "system"
+        dynamicColors = p.getBoolean("dynamic", true)
+        stylusOnly = p.getBoolean("stylus_default", false)
     }
 
-    fun setTheme(ctx: Context, value: String) {
-        theme = value
-        ctx.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit().putString(KEY_THEME, value).apply()
-    }
+    fun setTheme(ctx: Context, v: String) { theme = v; prefs(ctx).edit().putString("theme", v).apply() }
+    fun setDynamic(ctx: Context, v: Boolean) { dynamicColors = v; prefs(ctx).edit().putBoolean("dynamic", v).apply() }
+    fun setStylusOnly(ctx: Context, v: Boolean) { stylusOnly = v; prefs(ctx).edit().putBoolean("stylus_default", v).apply() }
 
-    fun setDynamic(ctx: Context, value: Boolean) {
-        dynamicColors = value
-        ctx.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit().putBoolean(KEY_DYNAMIC, value).apply()
-    }
-
-    fun setStylusOnly(ctx: Context, value: Boolean) {
-        stylusOnly = value
-        ctx.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit().putBoolean(KEY_STYLUS_ONLY, value).apply()
+    fun isDark(systemDark: Boolean): Boolean = when (theme) {
+        "dark" -> true
+        "light" -> false
+        else -> systemDark
     }
 }

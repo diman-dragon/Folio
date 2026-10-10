@@ -1,0 +1,1 @@
+DataLaw branding in About and the store listing. Targets Android 16 (API 36); Google Play and F-Droid publishing preparation. Privacy policy, store texts and graphics.

@@ -5,7 +5,6 @@ import com.artifex.mupdf.fitz.Document
 import com.artifex.mupdf.fitz.Matrix
 import com.artifex.mupdf.fitz.Outline
 import com.artifex.mupdf.fitz.Page
-import com.artifex.mupdf.fitz.Point
 import com.artifex.mupdf.fitz.Quad
 import com.artifex.mupdf.fitz.RectI
 import com.artifex.mupdf.fitz.android.AndroidDrawDevice
@@ -96,14 +95,33 @@ class MuPdfEngine(path: String) : DocumentEngine {
         else Hit(index, res.flatMap { quads -> quads.map { q -> quadRect(q, b.x0, b.y0, w, h) } })
     }
 
-    override fun textQuads(index: Int, ax: Float, ay: Float, bx: Float, by: Float): List<FloatArray> = withPage(index) { p ->
+    override fun selectText(index: Int, ax: Float, ay: Float, bx: Float, by: Float, mode: Int): TextSelection? = withPage(index) { p ->
         val b = p.bounds
         val w = b.x1 - b.x0
         val h = b.y1 - b.y0
         val st = p.toStructuredText()
         try {
-            val qs = st.highlight(Point(b.x0 + ax * w, b.y0 + ay * h), Point(b.x0 + bx * w, b.y0 + by * h))
-            if (qs == null) emptyList() else qs.map { q -> quadRect(q, b.x0, b.y0, w, h) }
+            val chars = ArrayList<TChar>()
+            var bi = 0
+            for (blk in st.blocks) {
+                var li = 0
+                for (ln in blk.lines) {
+                    for (ch in ln.chars) {
+                        val q = ch.quad
+                        chars.add(
+                            TChar(
+                                ch.c,
+                                (minOf(q.ul_x, q.ll_x) - b.x0) / w, (minOf(q.ul_y, q.ur_y) - b.y0) / h,
+                                (maxOf(q.ur_x, q.lr_x) - b.x0) / w, (maxOf(q.ll_y, q.lr_y) - b.y0) / h,
+                                bi, li
+                            )
+                        )
+                    }
+                    li++
+                }
+                bi++
+            }
+            TextSelect.select(chars, ax, ay, bx, by, mode)
         } finally {
             st.destroy()
         }

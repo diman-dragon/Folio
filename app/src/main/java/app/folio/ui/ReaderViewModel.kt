@@ -1,6 +1,9 @@
 package app.folio.ui
 
 import android.app.Application
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -13,6 +16,8 @@ import app.folio.engine.MuPdfEngine
 import app.folio.engine.PdfEditor
 import app.folio.engine.PdfExporter
 import app.folio.engine.SafeEngine
+import app.folio.engine.TextSelect
+import androidx.room.withTransaction
 import app.folio.engine.TocItem
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
@@ -54,7 +59,6 @@ class ReaderViewModel(app: Application) : AndroidViewModel(app) {
     private var lastW = 360f
     private var lastH = 640f
     private var searchJob: Job? = null
-    private val undoStack = ArrayDeque<Long>()
 
     val annotations: StateFlow<List<AnnotationEntity>> = state.map { it.hash }.distinctUntilChanged()
         .flatMapLatest { if (it.isEmpty()) flowOf(emptyList()) else db.annotations().observe(it) }
@@ -130,61 +134,149 @@ class ReaderViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { db.books().setProgress(b.uri, progress, System.currentTimeMillis()) }
     }
 
-    // ---------------- аннотации ----------------
+    // ---------------- аннотации + история (undo / redo) ----------------
+    private class Action(val removed: List<AnnotationEntity>, val added: List<AnnotationEntity>)
+
+    private val undoStack = ArrayDeque<Action>()
+    private val redoStack = ArrayDeque<Action>()
+    val canUndo = MutableStateFlow(false)
+    val canRedo = MutableStateFlow(false)
+
+    private fun refreshHistory() {
+        canUndo.value = undoStack.isNotEmpty()
+        canRedo.value = redoStack.isNotEmpty()
+    }
+
+    private fun clearHistory() { undoStack.clear(); redoStack.clear(); refreshHistory() }
+
+    private fun record(removed: List<AnnotationEntity>, added: List<AnnotationEntity>) {
+        undoStack.addLast(Action(removed, added))
+        redoStack.clear()
+        if (undoStack.size > 200) undoStack.removeFirst()
+        refreshHistory()
+    }
+
+    private suspend fun swap(delete: List<AnnotationEntity>, insert: List<AnnotationEntity>) {
+        val dao = db.annotations()
+        db.withTransaction {
+            if (delete.isNotEmpty()) dao.delete(delete.map { it.id })
+            for (e in insert) dao.insert(e)
+        }
+    }
+
+    private suspend fun insertOne(e: AnnotationEntity) {
+        val id = db.annotations().insert(e)
+        record(emptyList(), listOf(e.copy(id = id)))
+    }
+
+    fun undo() = viewModelScope.launch {
+        val a = undoStack.removeLastOrNull() ?: return@launch
+        swap(a.added, a.removed)
+        redoStack.addLast(a)
+        refreshHistory()
+    }
+
+    fun redo() = viewModelScope.launch {
+        val a = redoStack.removeLastOrNull() ?: return@launch
+        swap(a.removed, a.added)
+        undoStack.addLast(a)
+        refreshHistory()
+    }
+
     fun addStroke(page: Int, tool: Tool, color: Int, pts: FloatArray) = viewModelScope.launch {
         val s = _state.value
-        val id = db.annotations().insert(
+        insertOne(
             AnnotationEntity(docHash = s.hash, page = page, layoutKey = s.layoutKey, type = tool.name,
                 color = color, width = tool.width, points = pts.encode(), created = System.currentTimeMillis())
         )
-        undoStack.addLast(id)
     }
 
     fun addNote(page: Int, x: Float, y: Float, text: String) = viewModelScope.launch {
         val s = _state.value
-        val id = db.annotations().insert(
+        insertOne(
             AnnotationEntity(docHash = s.hash, page = page, layoutKey = s.layoutKey, type = "NOTE",
                 color = 0xFFFB8C00.toInt(), width = 0f, points = floatArrayOf(x, y, 1f).encode(),
                 text = text, created = System.currentTimeMillis())
         )
-        undoStack.addLast(id)
     }
 
-    /** Выделение/подчёркивание по словам: строки текста между двумя точками. */
-    fun addTextMarkup(page: Int, tool: Tool, color: Int, ax: Float, ay: Float, bx: Float, by: Float) = viewModelScope.launch {
+    private suspend fun markText(page: Int, tool: Tool, color: Int, sel: app.folio.engine.TextSelection) {
         val s = _state.value
-        val se = s.engine ?: return@launch
-        val rects = try { se.textQuads(page, ax, ay, bx, by) } catch (t: Throwable) { emptyList<FloatArray>() }
-        if (rects.isEmpty()) {
-            toast.tryEmit("Текстового слоя здесь нет — используйте «Маркер» или «Перо»")
-            return@launch
-        }
-        val arr = FloatArray(rects.size * 4) { rects[it / 4][it % 4] }
-        val id = db.annotations().insert(
+        val arr = FloatArray(sel.rects.size * 4) { sel.rects[it / 4][it % 4] }
+        insertOne(
             AnnotationEntity(docHash = s.hash, page = page, layoutKey = s.layoutKey,
                 type = if (tool == Tool.TEXT_HL) "TEXT_HL" else "TEXT_UL",
-                color = color, width = 0f, points = arr.encode(), created = System.currentTimeMillis())
+                color = color, width = 0f, points = arr.encode(), text = sel.text,
+                created = System.currentTimeMillis())
         )
-        undoStack.addLast(id)
     }
 
-    fun editNote(id: Long, text: String) = viewModelScope.launch { db.annotations().setText(id, text) }
-    fun deleteAnnotations(ids: List<Long>) = viewModelScope.launch { db.annotations().delete(ids) }
+    /**
+     * Выделение / подчёркивание / копирование по тексту. mode: TextSelect.WORD / SENTENCE / FREE.
+     * Тап (a == b) выделяет слово или предложение под пальцем, протяжка — диапазон.
+     */
+    fun addTextMarkup(page: Int, tool: Tool, color: Int, ax: Float, ay: Float, bx: Float, by: Float, mode: Int) = viewModelScope.launch {
+        val se = _state.value.engine ?: return@launch
+        val sel = try { se.selectText(page, ax, ay, bx, by, mode) } catch (t: Throwable) { null }
+        if (sel == null || sel.rects.isEmpty()) {
+            toast.tryEmit("Текст не найден. У сканов текстового слоя нет — используйте «Маркер» или «Перо»")
+            return@launch
+        }
+        if (tool == Tool.TEXT_COPY) {
+            val ctx = getApplication<Application>()
+            val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            cm.setPrimaryClip(ClipData.newPlainText("Folio", sel.text))
+            val preview = if (sel.text.length > 60) sel.text.take(60) + "…" else sel.text
+            toast.tryEmit("Скопировано: $preview")
+            return@launch
+        }
+        markText(page, tool, color, sel)
+    }
+
+    /** Долгий тап: слово (или предложение) под пальцем выделяется; если текста нет — вызывается onNoText (заметка в этой точке). */
+    fun longPressText(page: Int, x: Float, y: Float, color: Int, mode: Int, onNoText: () -> Unit) = viewModelScope.launch {
+        val se = _state.value.engine ?: return@launch
+        val m = if (mode == TextSelect.SENTENCE) TextSelect.SENTENCE else TextSelect.WORD
+        val sel = try { se.selectText(page, x, y, x, y, m) } catch (t: Throwable) { null }
+        if (sel == null || sel.rects.isEmpty()) { onNoText(); return@launch }
+        // чёрный маркер скрыл бы текст — для выделения берём жёлтый
+        val c = if ((color and 0x00FFFFFF) == 0) 0xFFFDD835.toInt() else color
+        markText(page, Tool.TEXT_HL, c, sel)
+    }
+
+    fun editNote(id: Long, text: String) = viewModelScope.launch {
+        val dao = db.annotations()
+        val old = dao.byIds(listOf(id)).firstOrNull() ?: return@launch
+        dao.setText(id, text)
+        record(listOf(old), listOf(old.copy(text = text)))
+    }
+
+    fun deleteAnnotations(ids: List<Long>) = viewModelScope.launch {
+        val dao = db.annotations()
+        val old = dao.byIds(ids)
+        if (old.isEmpty()) return@launch
+        dao.delete(ids)
+        record(old, emptyList())
+    }
 
     /** deleted — стёрты целиком; replaced — штрих заменяется уцелевшими кусками. */
     fun erase(deleted: List<Long>, replaced: Map<Long, List<FloatArray>>) = viewModelScope.launch {
         val dao = db.annotations()
-        val now = annotations.value
-        for ((id, parts) in replaced) {
-            val orig = now.firstOrNull { it.id == id } ?: continue
-            for (p in parts) dao.insert(orig.copy(id = 0, points = p.encode(), created = System.currentTimeMillis()))
+        val ids = deleted + replaced.keys
+        val old = dao.byIds(ids)
+        if (old.isEmpty()) return@launch
+        val added = ArrayList<AnnotationEntity>()
+        db.withTransaction {
+            for ((id, parts) in replaced) {
+                val orig = old.firstOrNull { it.id == id } ?: continue
+                for (p in parts) {
+                    val e = orig.copy(id = 0, points = p.encode(), created = System.currentTimeMillis())
+                    added += e.copy(id = dao.insert(e))
+                }
+            }
+            dao.delete(ids)
         }
-        dao.delete(deleted + replaced.keys)
-    }
-
-    fun undo() = viewModelScope.launch {
-        val id = undoStack.removeLastOrNull() ?: return@launch
-        db.annotations().delete(listOf(id))
+        record(old, added)
     }
 
     // ---------------- поиск ----------------
@@ -254,6 +346,7 @@ class ReaderViewModel(app: Application) : AndroidViewModel(app) {
                 val w = workFile()
                 withContext(Dispatchers.IO) { edit(w) }
                 fixAnnotations()
+                clearHistory()
                 reopen(w, keepPage)
             } catch (t: Throwable) {
                 toast.tryEmit("Ошибка: ${t.message ?: t.javaClass.simpleName}")
@@ -316,6 +409,7 @@ class ReaderViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 withContext(Dispatchers.IO) { File(workDir(), "$hash.pdf").delete() }
                 db.annotations().deleteAll(hash)
+                clearHistory()
                 val o = DocumentOpener(getApplication()).open(Uri.parse(b.uri), b.name)
                 val se = SafeEngine(o.engine)
                 _state.value.engine?.closeLater()

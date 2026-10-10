@@ -1,5 +1,5 @@
 name: release
-# Запуск: git tag v1.0.0 && git push origin v1.0.0
+# Запуск: git tag v1.1.0 && git push origin v1.1.0
 on:
   push:
     tags: ['v*']
@@ -43,7 +43,7 @@ jobs:
         run: |
           chmod +x gradlew
           VERSION="${GITHUB_REF_NAME#v}"
-          CODE=$((100 + GITHUB_RUN_NUMBER))
+          CODE=$((110 + GITHUB_RUN_NUMBER))
           ./gradlew :app:testDebugUnitTest :app:assembleRelease :app:bundleRelease \
             -PversionName="$VERSION" -PversionCode="$CODE" --console=plain
       - name: 16 KB page-size check
