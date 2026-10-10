@@ -11,25 +11,15 @@ val mupdfVersion = "1.25.2"
 // Подпись релиза: если заданы переменные окружения (в CI из секретов), используется ваш keystore, иначе — debug-ключ.
 val keystorePath: String? = System.getenv("KEYSTORE_FILE")
 
-// Версия: по умолчанию 1.0.0 / 100; в CI релиза переопределяется -PversionName / -PversionCode.
-val appVersionName: String = (project.findProperty("versionName") as String?) ?: "1.1.0"
-val appVersionCode: Int = (project.findProperty("versionCode") as String?)?.toIntOrNull() ?: 110
-
-// Ссылка на исходный код (требование AGPL): в GitHub Actions берётся из репозитория автоматически.
-val sourceUrl: String = (project.findProperty("sourceUrl") as String?)
-    ?: System.getenv("GITHUB_REPOSITORY")?.let { "https://github.com/$it" }
-    ?: "https://github.com"
-
 android {
     namespace = "app.folio"
-    compileSdk = 36
+    compileSdk = 35
     defaultConfig {
         applicationId = "app.folio"
         minSdk = 26
-        targetSdk = 36          // Google Play с 31.08.2026 принимает только targetSdk >= 36
-        versionCode = appVersionCode
-        versionName = appVersionName
-        buildConfigField("String", "SOURCE_URL", "\"$sourceUrl\"")
+        targetSdk = 35
+        versionCode = 2
+        versionName = "0.2.0"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
     }
     signingConfigs {
@@ -54,20 +44,7 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
-    buildFeatures {
-        compose = true
-        buildConfig = true
-    }
-    // не вшивать в APK/AAB блок зависимостей, подписанный ключом Google (нужно для F-Droid и воспроизводимости)
-    dependenciesInfo {
-        includeInApk = false
-        includeInBundle = false
-    }
-    lint {
-        // сборка релиза не должна падать из-за предупреждений линтера; проверки запускаются отдельно: ./gradlew lint
-        checkReleaseBuilds = false
-        abortOnError = false
-    }
+    buildFeatures { compose = true }
     packaging { resources.excludes += setOf("/META-INF/{AL2.0,LGPL2.1}", "META-INF/DEPENDENCIES") }
 }
 

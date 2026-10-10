@@ -1,7 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<!-- Android 11 и ниже: в резервную копию идут база (аннотации, прогресс) и настройки; тяжёлые файлы — нет. -->
-<full-backup-content>
-    <exclude domain="file" path="work" />
-    <exclude domain="file" path="covers" />
-    <exclude domain="cache" path="." />
-</full-backup-content>
