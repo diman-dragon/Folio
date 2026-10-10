@@ -99,7 +99,7 @@ private fun ReaderContent(vm: ReaderViewModel, st: ReaderState, onBack: () -> Un
     var paged by remember { mutableStateOf(prefs.getBoolean("paged", true)) }   // по страницам / лента
     var tool by remember { mutableStateOf(Tool.NONE) }
     var color by remember { mutableIntStateOf(Palette[0]) }
-    var stylusOnly by remember { mutableStateOf(false) }
+    var stylusOnly by remember { mutableStateOf(Settings.stylusOnly) } // значение из настроек приложения
     var chrome by remember { mutableStateOf(true) }
     var showThumbs by remember { mutableStateOf(false) }   // миниатюры скрыты по умолчанию
     var showToc by remember { mutableStateOf(false) }

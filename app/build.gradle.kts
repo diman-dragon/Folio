@@ -37,6 +37,10 @@ android {
             // R8 выключен намеренно: надёжная сборка важнее размера (MuPDF/junrar тянут много рефлексии).
             isMinifyEnabled = false
             signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
+            buildConfigField("String", "SOURCE_URL", "\"https://github.com/alexandrufolea/folio\"")
+        }
+        debug {
+            buildConfigField("String", "SOURCE_URL", "\"https://github.com/alexandrufolea/folio\"")
         }
     }
     compileOptions {
@@ -44,7 +48,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
-    buildFeatures { compose = true }
+    buildFeatures {
+        compose = true
+        buildConfig = true // генерировать app.folio.BuildConfig (нужен SettingsDialog.kt)
+    }
     packaging { resources.excludes += setOf("/META-INF/{AL2.0,LGPL2.1}", "META-INF/DEPENDENCIES") }
 }
 
