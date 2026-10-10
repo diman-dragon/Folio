@@ -1,5 +1,11 @@
 # Публикация Folio
 
+## Бренд DataLaw
+- Название разработчика в Play Console и F-Droid: **DataLaw**. В приложении знак и название — Настройки → О приложении (`ic_datalaw.xml`, `Brand.kt`).
+- Исходники знака: `docs/brand/datalaw-mark.svg` (вектор) и `docs/brand/datalaw-logo-original.png` (оригинал).
+- Графика для магазина содержит знак DataLaw в левом нижнем углу. Название приложения и значок Folio не менялись.
+- **Важно:** `applicationId` (`app.folio`) нельзя изменить после первой публикации в Google Play. Если хотите идентификатор в домене бренда (например, `com.datalaw.folio`), решите это ДО первой загрузки и поменяйте `namespace`/`applicationId` в `app/build.gradle.kts`.
+
 ## 0. Что уже готово
 - `targetSdk 36` / `compileSdk 36` — Google Play с 31.08.2026 принимает обновления только с API 36.
 - Toolchain на уровне Capacitor 8 (Android): AGP 8.13.0, Gradle 8.14.3, JDK 21 в CI, Kotlin 2.0.21.

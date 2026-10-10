@@ -10,6 +10,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
+      - name: Проверка файлов проекта
+        run: |
+          for f in settings.gradle.kts build.gradle.kts app/build.gradle.kts gradlew gradle/wrapper/gradle-wrapper.jar; do
+            if [ ! -f "$f" ]; then
+              echo "::error::В репозитории нет файла $f. Gradle без settings.gradle.kts ищет плагины только в Gradle Plugin Portal и падает на com.android.application. Добавьте файл и закоммитьте: git add -f $f"
+              exit 1
+            fi
+          done
       - uses: actions/setup-java@v5
         with: { distribution: temurin, java-version: 21 }
       - name: Android SDK (платформа 36, build-tools 35)

@@ -1,5 +1,7 @@
 # Folio — открытый просмотрщик документов для Android
 
+*Разработчик — **DataLaw**.*
+
 Kotlin + Jetpack Compose. Разработка: VS Code + GitHub. Лицензия **AGPL-3.0-or-later** (требование MuPDF).
 
 ## Что умеет (v0.2)

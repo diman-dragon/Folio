@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
@@ -18,8 +19,11 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
+import app.folio.Brand
 import app.folio.BuildConfig
+import app.folio.R
 import java.io.File
 
 private fun dirSize(f: File): Long = if (f.exists()) f.walkTopDown().filter { it.isFile }.sumOf { it.length() } else 0L
@@ -98,8 +102,22 @@ fun SettingsDialog(onDismiss: () -> Unit) {
                 )
 
                 SectionTitle("О приложении")
+                Row(Modifier.padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        painterResource(R.drawable.ic_datalaw), contentDescription = Brand.NAME,
+                        modifier = Modifier.size(40.dp), tint = MaterialTheme.colorScheme.onSurface
+                    )
+                    Column(Modifier.padding(start = 12.dp)) {
+                        Text(Brand.NAME, style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            "Разработчик Folio", style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
                 Text("Folio — открытый просмотрщик документов")
                 Text("Версия $version", style = MaterialTheme.typography.bodyMedium)
+                Text(Brand.COPYRIGHT, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.height(4.dp))
                 Text(
                     "Лицензия AGPL-3.0-or-later. Движок документов — MuPDF (Artifex Software), AGPL-3.0.",

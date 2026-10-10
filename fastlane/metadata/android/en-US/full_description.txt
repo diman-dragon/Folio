@@ -30,3 +30,5 @@ Recent and full library, covers from the first page, filters, sorting, search, f
 
 <b>Open source</b>
 AGPL-3.0. Document engine: MuPDF. The app collects no data and has no internet permission.
+
+Developed by DataLaw.
